@@ -1,25 +1,20 @@
 //! unset builtin - remove shell variables and environment variables
 const builtins = @import("../builtins.zig");
 const env = @import("../env.zig");
+const args = @import("../../terminal/args.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "unset",
-    .run = run,
-    .help = "unset <name>... - Remove shell variables and environment variables",
-};
+const spec = args.Spec("unset", .{
+    .desc = "Remove shell variables and environment variables.",
+    .args = .{
+        .names = args.Rest(.{ .desc = "Variable names to unset", .required = true }),
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    const argv = cmd.argv;
+pub const builtin = builtins.fromSpec(spec, run);
 
-    if (argv.len < 2) {
-        builtins.io.printError("unset: usage: unset NAME...\n", .{});
-        return 1;
-    }
-
-    // Unset each named variable (both shell var and environment)
-    for (argv[1..]) |name| {
+fn run(state: *builtins.State, r: spec.Result) u8 {
+    for (r.names) |name| {
         state.unsetVar(name);
-        // Also remove from environment (ignore errors - variable may not exist in env)
         env.unset(state.allocator, name) catch {};
     }
 

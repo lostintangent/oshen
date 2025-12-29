@@ -590,7 +590,7 @@ pub const Parser = struct {
     fn parseExitStatement(self: *Parser) Statement {
         _ = self.advance(); // consume 'exit'
         const status = if (self.isWord()) self.captureWord() else null;
-        return .{ .@"exit" = status };
+        return .{ .exit = status };
     }
 
     /// Captures a single word token as trimmed source text.
@@ -706,680 +706,487 @@ pub const Parser = struct {
 const testing = std.testing;
 const lexer = @import("lexer.zig");
 
-/// Tokenizes and parses input, returning the parsed program.
-fn parseTest(arena: *std.heap.ArenaAllocator, input: []const u8) !Program {
-    const allocator = arena.allocator();
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-    var p = Parser.initWithInput(allocator, tokens, input);
-    return try p.parse();
-}
+const TestContext = struct {
+    arena: std.heap.ArenaAllocator,
 
-/// Tokenizes and parses input without source (for tests that don't need body extraction).
-fn parseTestNoSource(arena: *std.heap.ArenaAllocator, input: []const u8) !Program {
-    const allocator = arena.allocator();
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-    var p = Parser.init(allocator, tokens);
-    return try p.parse();
-}
+    fn init() TestContext {
+        return .{ .arena = std.heap.ArenaAllocator.init(testing.allocator) };
+    }
 
-test "Commands: simple command" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    fn deinit(self: *TestContext) void {
+        self.arena.deinit();
+    }
 
-    const prog = try parseTestNoSource(&arena, "echo hello");
+    /// Parse input and return the AST. Use this for most tests.
+    fn parse(self: *TestContext, input: []const u8) !Program {
+        const allocator = self.arena.allocator();
+
+        var lex = lexer.Lexer.init(allocator, input);
+        const tokens = try lex.tokenize();
+
+        var p = Parser.initWithInput(allocator, tokens, input);
+        return try p.parse();
+    }
+
+    /// Expect a parse error.
+    fn expectError(self: *TestContext, input: []const u8, expected: ParseError) !void {
+        const allocator = self.arena.allocator();
+        var lex = lexer.Lexer.init(allocator, input);
+        const tokens = try lex.tokenize();
+        var p = Parser.initWithInput(allocator, tokens, input);
+        try testing.expectError(expected, p.parse());
+    }
+
+    /// Get the first command from a parsed program.
+    fn firstCommand(prog: Program) Command {
+        return prog.statements[0].command.chains[0].pipeline.commands[0];
+    }
+};
+
+// -----------------------------------------------------------------------------
+// Commands and Pipelines
+// -----------------------------------------------------------------------------
+
+test "Commands: simple command with arguments" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    const prog = try ctx.parse("echo hello");
+    const cmd_stmt = prog.statements[0].command;
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const cmd_stmt = prog.statements[0].command;
     try testing.expectEqual(false, cmd_stmt.background);
     try testing.expectEqual(@as(?Capture, null), cmd_stmt.capture);
     try testing.expectEqual(@as(usize, 1), cmd_stmt.chains.len);
-    try testing.expectEqual(ast.ChainOperator.none, cmd_stmt.chains[0].op);
-    try testing.expectEqual(@as(usize, 1), cmd_stmt.chains[0].pipeline.commands.len);
-    try testing.expectEqual(@as(usize, 2), cmd_stmt.chains[0].pipeline.commands[0].words.len);
+    try testing.expectEqual(@as(usize, 2), TestContext.firstCommand(prog).words.len);
 }
 
-test "Commands: pipeline" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Commands: pipeline chains multiple commands" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const prog = try parseTestNoSource(&arena, "cat file | grep foo | wc -l");
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const prog = try ctx.parse("cat file | grep foo | wc -l");
     const pipeline = prog.statements[0].command.chains[0].pipeline;
+
     try testing.expectEqual(@as(usize, 3), pipeline.commands.len);
 }
 
 test "Commands: background execution" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const prog = try parseTestNoSource(&arena, "sleep 10 &");
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const prog = try ctx.parse("sleep 10 &");
     try testing.expectEqual(true, prog.statements[0].command.background);
 }
 
-test "Capture: string mode (=>)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Output Capture
+// -----------------------------------------------------------------------------
 
-    const prog = try parseTestNoSource(&arena, "whoami => user");
+test "Capture: string and lines modes" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    if (prog.statements[0].command.capture) |cap| {
-        try testing.expectEqual(CaptureMode.string, cap.mode);
-        try testing.expectEqualStrings("user", cap.variable);
-    } else {
-        return error.TestExpectedEqual;
+    const cases = [_]struct { []const u8, CaptureMode, []const u8 }{
+        .{ "whoami => user", .string, "user" },
+        .{ "ls =>@ files", .lines, "files" },
+    };
+
+    for (cases) |case| {
+        const prog = try ctx.parse(case[0]);
+        const cap = prog.statements[0].command.capture orelse return error.TestExpectedEqual;
+        try testing.expectEqual(case[1], cap.mode);
+        try testing.expectEqualStrings(case[2], cap.variable);
     }
 }
 
-test "Capture: lines mode (=>@)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Logical Operators
+// -----------------------------------------------------------------------------
 
-    const prog = try parseTestNoSource(&arena, "ls =>@ files");
+test "Logical: && and || chain commands" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    if (prog.statements[0].command.capture) |cap| {
-        try testing.expectEqual(CaptureMode.lines, cap.mode);
-        try testing.expectEqualStrings("files", cap.variable);
-    } else {
-        return error.TestExpectedEqual;
-    }
-}
-
-test "Logical: && and || operators" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const prog = try parseTestNoSource(&arena, "true && echo ok || echo fail");
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const prog = try ctx.parse("true && echo ok || echo fail");
     const cmd_stmt = prog.statements[0].command;
+
     try testing.expectEqual(@as(usize, 3), cmd_stmt.chains.len);
     try testing.expectEqual(ast.ChainOperator.none, cmd_stmt.chains[0].op);
     try testing.expectEqual(ast.ChainOperator.@"and", cmd_stmt.chains[1].op);
     try testing.expectEqual(ast.ChainOperator.@"or", cmd_stmt.chains[2].op);
 }
 
-test "Redirections: input and output" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Redirections
+// -----------------------------------------------------------------------------
 
-    const prog = try parseTestNoSource(&arena, "cat < in.txt > out.txt");
+test "Redirections: all types parse correctly" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
-    try testing.expectEqual(@as(usize, 2), cmd.redirects.len);
-
-    // Input redirect
-    const r1 = cmd.redirects[0];
-    try testing.expectEqual(@as(u8, 0), r1.from_fd);
-    switch (r1.kind) {
-        .read => |parts| {
-            try testing.expectEqual(@as(usize, 1), parts.len);
-            try testing.expectEqualStrings("in.txt", parts[0].text);
-        },
+    // Input and output (truncate)
+    const basic = try ctx.parse("cat < in.txt > out.txt");
+    const cmd1 = TestContext.firstCommand(basic);
+    try testing.expectEqual(@as(usize, 2), cmd1.redirects.len);
+    try testing.expectEqual(@as(u8, 0), cmd1.redirects[0].from_fd);
+    switch (cmd1.redirects[0].kind) {
+        .read => |parts| try testing.expectEqualStrings("in.txt", parts[0].text),
+        else => return error.TestExpectedEqual,
+    }
+    switch (cmd1.redirects[1].kind) {
+        .write_truncate => |parts| try testing.expectEqualStrings("out.txt", parts[0].text),
         else => return error.TestExpectedEqual,
     }
 
-    // Output redirect
-    const r2 = cmd.redirects[1];
-    try testing.expectEqual(@as(u8, 1), r2.from_fd);
-    switch (r2.kind) {
-        .write_truncate => |parts| {
-            try testing.expectEqual(@as(usize, 1), parts.len);
-            try testing.expectEqualStrings("out.txt", parts[0].text);
-        },
+    // Append
+    const append = try ctx.parse("echo msg >> log.txt");
+    const cmd2 = TestContext.firstCommand(append);
+    switch (cmd2.redirects[0].kind) {
+        .write_append => |parts| try testing.expectEqualStrings("log.txt", parts[0].text),
         else => return error.TestExpectedEqual,
     }
-}
 
-test "Redirections: quoted path with spaces" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const prog = try parseTestNoSource(&arena, "echo test > \"foo bar.txt\"");
-
-    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
-    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
-
-    const r = cmd.redirects[0];
-    try testing.expectEqual(@as(u8, 1), r.from_fd);
-    switch (r.kind) {
-        .write_truncate => |parts| {
-            try testing.expectEqual(@as(usize, 1), parts.len);
-            try testing.expectEqualStrings("foo bar.txt", parts[0].text);
-            try testing.expectEqual(QuoteKind.double, parts[0].quotes);
-        },
+    // Stderr to stdout dup
+    const dup = try ctx.parse("cmd 2>&1");
+    const cmd3 = TestContext.firstCommand(dup);
+    try testing.expectEqual(@as(u8, 2), cmd3.redirects[0].from_fd);
+    switch (cmd3.redirects[0].kind) {
+        .dup => |fd| try testing.expectEqual(@as(u8, 1), fd),
         else => return error.TestExpectedEqual,
     }
 }
 
-test "Redirections: single-quoted path preserves literal" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Redirections: quoting affects path parsing" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const prog = try parseTestNoSource(&arena, "echo test > '$var.txt'");
+    const cases = [_]struct { []const u8, []const u8, QuoteKind }{
+        .{ "echo > \"foo bar.txt\"", "foo bar.txt", .double },
+        .{ "echo > '$var.txt'", "$var.txt", .single },
+        .{ "echo > $outfile", "$outfile", .none },
+    };
 
-    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
-    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
-
-    const r = cmd.redirects[0];
-    switch (r.kind) {
-        .write_truncate => |parts| {
-            try testing.expectEqual(@as(usize, 1), parts.len);
-            try testing.expectEqualStrings("$var.txt", parts[0].text);
-            try testing.expectEqual(QuoteKind.single, parts[0].quotes);
-        },
-        else => return error.TestExpectedEqual,
+    for (cases) |case| {
+        const prog = try ctx.parse(case[0]);
+        const cmd = TestContext.firstCommand(prog);
+        switch (cmd.redirects[0].kind) {
+            .write_truncate => |parts| {
+                try testing.expectEqualStrings(case[1], parts[0].text);
+                try testing.expectEqual(case[2], parts[0].quotes);
+            },
+            else => return error.TestExpectedEqual,
+        }
     }
 }
 
-test "Redirections: variable in path" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const prog = try parseTestNoSource(&arena, "echo test > $outfile");
-
-    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
-    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
-
-    const r = cmd.redirects[0];
-    switch (r.kind) {
-        .write_truncate => |parts| {
-            try testing.expectEqual(@as(usize, 1), parts.len);
-            try testing.expectEqualStrings("$outfile", parts[0].text);
-            try testing.expectEqual(QuoteKind.none, parts[0].quotes);
-        },
-        else => return error.TestExpectedEqual,
-    }
-}
+// -----------------------------------------------------------------------------
+// Assignments
+// -----------------------------------------------------------------------------
 
 test "Assignments: environment prefix" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const prog = try parseTestNoSource(&arena, "FOO=bar env");
+    // Single assignment
+    const single = try ctx.parse("FOO=bar env");
+    const cmd1 = TestContext.firstCommand(single);
+    try testing.expectEqual(@as(usize, 1), cmd1.assignments.len);
+    try testing.expectEqualStrings("FOO", cmd1.assignments[0].key);
+    try testing.expectEqualStrings("bar", cmd1.assignments[0].value);
 
-    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
-    try testing.expectEqual(@as(usize, 1), cmd.assignments.len);
-    try testing.expectEqualStrings("FOO", cmd.assignments[0].key);
+    // Multiple assignments
+    const multi = try ctx.parse("FOO=a BAR=b BAZ=c cmd");
+    const cmd2 = TestContext.firstCommand(multi);
+    try testing.expectEqual(@as(usize, 3), cmd2.assignments.len);
+    try testing.expectEqualStrings("FOO", cmd2.assignments[0].key);
+    try testing.expectEqualStrings("BAR", cmd2.assignments[1].key);
+    try testing.expectEqualStrings("BAZ", cmd2.assignments[2].key);
 }
 
-test "Functions: basic definition" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Functions
+// -----------------------------------------------------------------------------
 
-    const input = "fun greet\n  echo hello\nend";
-    const prog = try parseTest(&arena, input);
+test "Functions: definition styles" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const fun_def = prog.statements[0].function;
-    try testing.expectEqualStrings("greet", fun_def.name);
-    try testing.expect(std.mem.indexOf(u8, fun_def.body, "echo hello") != null);
-}
+    // Multi-line definition
+    const multiline = try ctx.parse("fun greet\n  echo hello\nend");
+    try testing.expectEqualStrings("greet", multiline.statements[0].function.name);
+    try testing.expect(std.mem.indexOf(u8, multiline.statements[0].function.body, "echo hello") != null);
 
-test "Functions: inline definition" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "fun greet echo hello end";
-    const prog = try parseTest(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const fun_def = prog.statements[0].function;
-    try testing.expectEqualStrings("greet", fun_def.name);
-    try testing.expect(std.mem.indexOf(u8, fun_def.body, "echo hello") != null);
+    // Inline definition
+    const inline_def = try ctx.parse("fun greet; echo hello; end");
+    try testing.expectEqualStrings("greet", inline_def.statements[0].function.name);
+    try testing.expect(std.mem.indexOf(u8, inline_def.statements[0].function.body, "echo hello") != null);
 }
 
 test "Functions: nested definitions" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "fun outer\n  fun inner\n    echo inner\n  end\n  inner\nend";
-    const prog = try parseTest(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const prog = try ctx.parse("fun outer\n  fun inner\n    echo inner\n  end\n  inner\nend");
     const fun_def = prog.statements[0].function;
+
     try testing.expectEqualStrings("outer", fun_def.name);
-    // Body should contain the nested fun...end
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "fun inner") != null);
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "end") != null);
 }
 
-test "Functions: unterminated error" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Functions: errors" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "fun greet\n  echo hello";
-    var lex = lexer.Lexer.init(arena.allocator(), input);
-    const tokens = try lex.tokenize();
-    var p = Parser.initWithInput(arena.allocator(), tokens, input);
-
-    try testing.expectError(ParseError.UnterminatedFunction, p.parse());
+    try ctx.expectError("fun greet\n  echo hello", ParseError.UnterminatedFunction);
+    try ctx.expectError("fun \"quoted\" body end", ParseError.InvalidFunctionName);
 }
 
-test "Functions: invalid name error" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// If Statements
+// -----------------------------------------------------------------------------
 
-    const input = "fun \"quoted\" body end";
-    var lex = lexer.Lexer.init(arena.allocator(), input);
-    const tokens = try lex.tokenize();
-    var p = Parser.initWithInput(arena.allocator(), tokens, input);
+test "If: simple and inline forms" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectError(ParseError.InvalidFunctionName, p.parse());
+    // Multi-line
+    const multiline = try ctx.parse("if true\n  echo yes\nend");
+    const if1 = multiline.statements[0].@"if";
+    try testing.expectEqual(@as(usize, 1), if1.branches.len);
+    try testing.expectEqual(@as(usize, 1), if1.branches[0].condition.chains.len);
+    try testing.expect(std.mem.indexOf(u8, if1.branches[0].body, "echo yes") != null);
+    try testing.expectEqual(@as(?[]const u8, null), if1.else_body);
+
+    // Inline
+    const inline_if = try ctx.parse("if true; echo yes; end");
+    try testing.expectEqual(@as(usize, 1), inline_if.statements[0].@"if".branches.len);
 }
 
-test "If: simple statement" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "If: with else branch" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "if true\n  echo yes\nend";
-    const prog = try parseTestNoSource(&arena, input);
+    const prog = try ctx.parse("if false\n  echo no\nelse\n  echo yes\nend");
+    const if_stmt = prog.statements[0].@"if";
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].@"if";
-    try testing.expectEqual(@as(usize, 1), @"if".branches.len);
-    // Condition is now a pre-parsed CommandStatement
-    const cond = @"if".branches[0].condition;
-    try testing.expectEqual(false, cond.background);
-    try testing.expectEqual(@as(?Capture, null), cond.capture);
-    try testing.expectEqual(@as(usize, 1), cond.chains.len);
-    try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo yes") != null);
-    try testing.expectEqual(@as(?[]const u8, null), @"if".else_body);
+    try testing.expectEqual(@as(usize, 1), if_stmt.branches.len);
+    try testing.expect(std.mem.indexOf(u8, if_stmt.branches[0].body, "echo no") != null);
+    try testing.expect(if_stmt.else_body != null);
+    try testing.expect(std.mem.indexOf(u8, if_stmt.else_body.?, "echo yes") != null);
 }
 
-test "If: with else" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "If: else-if chains" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "if false\n  echo no\nelse\n  echo yes\nend";
-    const prog = try parseTestNoSource(&arena, input);
+    // With final else
+    const with_else = try ctx.parse("if test $x -eq 1\n  echo one\nelse if test $x -eq 2\n  echo two\nelse\n  echo other\nend");
+    const if1 = with_else.statements[0].@"if";
+    try testing.expectEqual(@as(usize, 2), if1.branches.len);
+    try testing.expectEqual(@as(usize, 4), if1.branches[0].condition.chains[0].pipeline.commands[0].words.len);
+    try testing.expect(if1.else_body != null);
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].@"if";
-    try testing.expectEqual(@as(usize, 1), @"if".branches.len);
-    // Condition is pre-parsed
-    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
-    try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo no") != null);
-    try testing.expect(@"if".else_body != null);
-    try testing.expect(std.mem.indexOf(u8, @"if".else_body.?, "echo yes") != null);
-}
-
-test "If: inline statement" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "if true; echo yes; end";
-    const prog = try parseTestNoSource(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].@"if";
-    try testing.expectEqual(@as(usize, 1), @"if".branches.len);
-    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
-    try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo yes") != null);
+    // Without final else
+    const without_else = try ctx.parse("if false; echo a; else if true; echo b; end");
+    const if2 = without_else.statements[0].@"if";
+    try testing.expectEqual(@as(usize, 2), if2.branches.len);
+    try testing.expectEqual(@as(?[]const u8, null), if2.else_body);
 }
 
 test "If: nested statements" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "if true\n  if false\n    echo inner\n  end\nend";
-    const prog = try parseTestNoSource(&arena, input);
+    const prog = try ctx.parse("if true\n  if false\n    echo inner\n  end\nend");
+    const if_stmt = prog.statements[0].@"if";
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].@"if";
-    try testing.expectEqual(@as(usize, 1), @"if".branches.len);
-    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
-    // Body should contain the nested if...end
-    try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "if false") != null);
-    try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "end") != null);
-}
-
-test "If: else-if chain" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "if test $x -eq 1\n  echo one\nelse if test $x -eq 2\n  echo two\nelse\n  echo other\nend";
-    const prog = try parseTestNoSource(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].@"if";
-    try testing.expectEqual(@as(usize, 2), @"if".branches.len);
-    // Both if and else-if conditions are pre-parsed
-    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
-    try testing.expectEqual(@as(usize, 4), @"if".branches[0].condition.chains[0].pipeline.commands[0].words.len); // test $x -eq 1
-    try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo one") != null);
-    try testing.expectEqual(@as(usize, 1), @"if".branches[1].condition.chains.len);
-    try testing.expectEqual(@as(usize, 4), @"if".branches[1].condition.chains[0].pipeline.commands[0].words.len); // test $x -eq 2
-    try testing.expect(std.mem.indexOf(u8, @"if".branches[1].body, "echo two") != null);
-    try testing.expect(@"if".else_body != null);
-    try testing.expect(std.mem.indexOf(u8, @"if".else_body.?, "echo other") != null);
-}
-
-test "If: else-if without final else" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "if false; echo a; else if true; echo b; end";
-    const prog = try parseTestNoSource(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].@"if";
-    try testing.expectEqual(@as(usize, 2), @"if".branches.len);
-    // Both branches have pre-parsed conditions
-    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
-    try testing.expectEqual(@as(usize, 1), @"if".branches[1].condition.chains.len);
-    try testing.expectEqual(@as(?[]const u8, null), @"if".else_body);
+    try testing.expect(std.mem.indexOf(u8, if_stmt.branches[0].body, "if false") != null);
+    try testing.expect(std.mem.indexOf(u8, if_stmt.branches[0].body, "end") != null);
 }
 
 test "If: unterminated error" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "if true\n  echo yes";
-    var lex = lexer.Lexer.init(arena.allocator(), input);
-    const tokens = try lex.tokenize();
-    var p = Parser.initWithInput(arena.allocator(), tokens, input);
-
-    try testing.expectError(ParseError.UnterminatedIf, p.parse());
+    try ctx.expectError("if true\n  echo yes", ParseError.UnterminatedIf);
 }
 
-test "While: simple statement" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// While Loops
+// -----------------------------------------------------------------------------
 
-    const input = "while test -f file\n  sleep 1\nend";
-    const prog = try parseTestNoSource(&arena, input);
+test "While: simple and inline forms" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const while_stmt = prog.statements[0].@"while";
-    // Condition is pre-parsed
-    try testing.expectEqual(@as(usize, 1), while_stmt.condition.chains.len);
-    try testing.expectEqual(@as(usize, 3), while_stmt.condition.chains[0].pipeline.commands[0].words.len); // test -f file
-    try testing.expect(std.mem.indexOf(u8, while_stmt.body, "sleep 1") != null);
-}
+    // Multi-line
+    const multiline = try ctx.parse("while test -f file\n  sleep 1\nend");
+    const while1 = multiline.statements[0].@"while";
+    try testing.expectEqual(@as(usize, 3), while1.condition.chains[0].pipeline.commands[0].words.len);
+    try testing.expect(std.mem.indexOf(u8, while1.body, "sleep 1") != null);
 
-test "While: inline statement" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "while true; echo loop; end";
-    const prog = try parseTestNoSource(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const while_stmt = prog.statements[0].@"while";
-    // Condition is pre-parsed
-    try testing.expectEqual(@as(usize, 1), while_stmt.condition.chains.len);
-    try testing.expect(std.mem.indexOf(u8, while_stmt.body, "echo loop") != null);
+    // Inline
+    const inline_while = try ctx.parse("while true; echo loop; end");
+    try testing.expectEqual(@as(usize, 1), inline_while.statements[0].@"while".condition.chains.len);
 }
 
 test "While: nested in if" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "if true\n  while false\n    echo inner\n  end\nend";
-    const prog = try parseTestNoSource(&arena, input);
+    const prog = try ctx.parse("if true\n  while false\n    echo inner\n  end\nend");
+    const if_stmt = prog.statements[0].@"if";
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].@"if";
-    try testing.expectEqual(@as(usize, 1), @"if".branches.len);
-    // Body should contain the nested while...end
-    try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "while false") != null);
+    try testing.expect(std.mem.indexOf(u8, if_stmt.branches[0].body, "while false") != null);
 }
 
 test "While: unterminated error" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "while true\n  echo loop";
-    var lex = lexer.Lexer.init(arena.allocator(), input);
-    const tokens = try lex.tokenize();
-    var p = Parser.initWithInput(arena.allocator(), tokens, input);
-
-    try testing.expectError(ParseError.UnterminatedWhile, p.parse());
+    try ctx.expectError("while true\n  echo loop", ParseError.UnterminatedWhile);
 }
 
-test "Control: break statement" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Control Flow (break, continue, return)
+// -----------------------------------------------------------------------------
 
-    const prog = try parseTest(&arena, "break");
+test "Control: break and continue" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0] == .@"break");
+    const break_prog = try ctx.parse("break");
+    try testing.expect(break_prog.statements[0] == .@"break");
+
+    const continue_prog = try ctx.parse("continue");
+    try testing.expect(continue_prog.statements[0] == .@"continue");
 }
 
-test "Control: continue statement" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Return and Exit: with and without status" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const prog = try parseTest(&arena, "continue");
+    // Return statements
+    const ret = try ctx.parse("return");
+    try testing.expect(ret.statements[0] == .@"return");
+    try testing.expectEqual(@as(?[]const u8, null), ret.statements[0].@"return");
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0] == .@"continue");
+    const ret1 = try ctx.parse("return 1");
+    try testing.expectEqualStrings("1", ret1.statements[0].@"return".?);
+
+    const retVar = try ctx.parse("return $status");
+    try testing.expectEqualStrings("$status", retVar.statements[0].@"return".?);
+
+    // Exit statements (same structure as return)
+    const exit = try ctx.parse("exit");
+    try testing.expect(exit.statements[0] == .exit);
+    try testing.expectEqual(@as(?[]const u8, null), exit.statements[0].exit);
+
+    const exit0 = try ctx.parse("exit 0");
+    try testing.expectEqualStrings("0", exit0.statements[0].exit.?);
+
+    const exitVar = try ctx.parse("exit $code");
+    try testing.expectEqualStrings("$code", exitVar.statements[0].exit.?);
 }
 
-test "Return: without argument" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Defer
+// -----------------------------------------------------------------------------
 
-    const prog = try parseTest(&arena, "return");
+test "Defer: command forms" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0] == .@"return");
-    try testing.expectEqual(@as(?[]const u8, null), prog.statements[0].@"return");
+    // Simple command
+    const simple = try ctx.parse("defer rm -rf $tmpdir");
+    const defer1 = simple.statements[0].@"defer";
+    try testing.expectEqual(false, defer1.background);
+    try testing.expectEqual(@as(usize, 3), defer1.chains[0].pipeline.commands[0].words.len);
+
+    // With pipeline
+    const pipeline = try ctx.parse("defer cat file | grep foo");
+    try testing.expectEqual(@as(usize, 2), pipeline.statements[0].@"defer".chains[0].pipeline.commands.len);
+
+    // With logical chain
+    const logical = try ctx.parse("defer rm file && echo done");
+    const defer3 = logical.statements[0].@"defer";
+    try testing.expectEqual(@as(usize, 2), defer3.chains.len);
+    try testing.expectEqual(ast.ChainOperator.@"and", defer3.chains[1].op);
 }
 
-test "Return: with status" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Defer: in function body" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const prog = try parseTest(&arena, "return 1");
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0] == .@"return");
-    try testing.expectEqualStrings("1", prog.statements[0].@"return".?);
-}
-
-test "Return: with zero" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const prog = try parseTest(&arena, "return 0");
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0] == .@"return");
-    try testing.expectEqualStrings("0", prog.statements[0].@"return".?);
-}
-
-test "Return: with variable" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const prog = try parseTest(&arena, "return $status");
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0] == .@"return");
-    try testing.expectEqualStrings("$status", prog.statements[0].@"return".?);
-}
-
-test "Defer: simple command" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const prog = try parseTestNoSource(&arena, "defer rm -rf $tmpdir");
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0] == .@"defer");
-
-    const defer_cmd = prog.statements[0].@"defer";
-    try testing.expectEqual(false, defer_cmd.background);
-    try testing.expectEqual(@as(?Capture, null), defer_cmd.capture);
-    try testing.expectEqual(@as(usize, 1), defer_cmd.chains.len);
-    try testing.expectEqual(@as(usize, 1), defer_cmd.chains[0].pipeline.commands.len);
-    try testing.expectEqual(@as(usize, 3), defer_cmd.chains[0].pipeline.commands[0].words.len);
-}
-
-test "Defer: in function" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "fun cleanup\n  defer echo done\n  echo working\nend";
-    const prog = try parseTest(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const prog = try ctx.parse("fun cleanup\n  defer echo done\n  echo working\nend");
     const fun_def = prog.statements[0].function;
+
     try testing.expectEqualStrings("cleanup", fun_def.name);
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "defer echo done") != null);
 }
 
-test "Defer: with pipeline" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Defer: errors for invalid modifiers" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const prog = try parseTestNoSource(&arena, "defer cat file | grep foo");
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0] == .@"defer");
-
-    const defer_cmd = prog.statements[0].@"defer";
-    try testing.expectEqual(@as(usize, 1), defer_cmd.chains.len);
-    try testing.expectEqual(@as(usize, 2), defer_cmd.chains[0].pipeline.commands.len);
+    try ctx.expectError("defer rm file &", ParseError.ConditionWithBackground);
+    try ctx.expectError("defer whoami => user", ParseError.ConditionWithCapture);
 }
 
-test "Defer: with logical chain" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Each/For Loops
+// -----------------------------------------------------------------------------
 
-    const prog = try parseTestNoSource(&arena, "defer rm file && echo done");
+test "Each: implicit and explicit variable" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0] == .@"defer");
+    // Implicit $item variable
+    const implicit = try ctx.parse("each a b c\n  echo $item\nend");
+    const each1 = implicit.statements[0].each;
+    try testing.expectEqualStrings("item", each1.variable);
+    try testing.expectEqualStrings("a b c", each1.items_source);
 
-    const defer_cmd = prog.statements[0].@"defer";
-    try testing.expectEqual(@as(usize, 2), defer_cmd.chains.len);
-    try testing.expectEqual(ast.ChainOperator.none, defer_cmd.chains[0].op);
-    try testing.expectEqual(ast.ChainOperator.@"and", defer_cmd.chains[1].op);
+    // Explicit variable with 'in'
+    const explicit = try ctx.parse("each x in 1 2 3\n  echo $x\nend");
+    const each2 = explicit.statements[0].each;
+    try testing.expectEqualStrings("x", each2.variable);
+    try testing.expectEqualStrings("1 2 3", each2.items_source);
 }
 
-test "Defer: background error" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Each: inline form" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "defer rm file &";
-    var lex = lexer.Lexer.init(arena.allocator(), input);
-    const tokens = try lex.tokenize();
-    var p = Parser.initWithInput(arena.allocator(), tokens, input);
-
-    try testing.expectError(ParseError.ConditionWithBackground, p.parse());
+    const prog = try ctx.parse("each a b c; echo $item; end");
+    try testing.expectEqualStrings("item", prog.statements[0].each.variable);
 }
 
-test "Defer: capture error" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Each: 'for' keyword is an alias" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "defer whoami => user";
-    var lex = lexer.Lexer.init(arena.allocator(), input);
-    const tokens = try lex.tokenize();
-    var p = Parser.initWithInput(arena.allocator(), tokens, input);
+    // 'for' works exactly like 'each'
+    const implicit = try ctx.parse("for a b c\n  echo $item\nend");
+    try testing.expectEqualStrings("item", implicit.statements[0].each.variable);
 
-    try testing.expectError(ParseError.ConditionWithCapture, p.parse());
+    const explicit = try ctx.parse("for x in 1 2 3\n  echo $x\nend");
+    try testing.expectEqualStrings("x", explicit.statements[0].each.variable);
 }
 
-// =============================================================================
-// Each loop tests
-// =============================================================================
+test "Each: nested loops" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-test "Each: basic with implicit item" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "each a b c\n  echo $item\nend";
-    const prog = try parseTest(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].each;
-    try testing.expectEqualStrings("item", each_stmt.variable);
-    try testing.expectEqualStrings("a b c", each_stmt.items_source);
-    try testing.expect(std.mem.indexOf(u8, each_stmt.body, "echo $item") != null);
-}
-
-test "Each: with explicit variable" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "each x in 1 2 3\n  echo $x\nend";
-    const prog = try parseTest(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].each;
-    try testing.expectEqualStrings("x", each_stmt.variable);
-    try testing.expectEqualStrings("1 2 3", each_stmt.items_source);
-}
-
-test "Each: inline statement" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "each a b c; echo $item; end";
-    const prog = try parseTest(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].each;
-    try testing.expectEqualStrings("item", each_stmt.variable);
-}
-
-test "Each: for keyword alias with implicit item" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "for a b c\n  echo $item\nend";
-    const prog = try parseTest(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].each;
-    try testing.expectEqualStrings("item", each_stmt.variable);
-    try testing.expectEqualStrings("a b c", each_stmt.items_source);
-}
-
-test "Each: for keyword alias with explicit variable" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "for x in 1 2 3\n  echo $x\nend";
-    const prog = try parseTest(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].each;
-    try testing.expectEqualStrings("x", each_stmt.variable);
-    try testing.expectEqualStrings("1 2 3", each_stmt.items_source);
-}
-
-test "Each: nested" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const input = "each a b\n  each 1 2\n    echo $item\n  end\nend";
-    const prog = try parseTest(&arena, input);
-
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].each;
-    try testing.expect(std.mem.indexOf(u8, each_stmt.body, "each 1 2") != null);
+    const prog = try ctx.parse("each a b\n  each 1 2\n    echo $item\n  end\nend");
+    try testing.expect(std.mem.indexOf(u8, prog.statements[0].each.body, "each 1 2") != null);
 }
 
 test "Each: unterminated error" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const input = "each a b c\n  echo $item";
-    var lex = lexer.Lexer.init(arena.allocator(), input);
-    const tokens = try lex.tokenize();
-    var p = Parser.initWithInput(arena.allocator(), tokens, input);
-
-    try testing.expectError(ParseError.UnterminatedEach, p.parse());
+    try ctx.expectError("each a b c\n  echo $item", ParseError.UnterminatedEach);
 }

@@ -1,14 +1,20 @@
 //! bg builtin - continue job in background
+//!
+//! NOTE: No unit or E2E tests - requires TTY and real process groups.
 const builtins = @import("../builtins.zig");
+const args = @import("../../terminal/args.zig");
 const exec = @import("../../interpreter/execution/exec.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "bg",
-    .run = run,
-    .help = "Continue a stopped job in the background",
-};
+const spec = args.Spec("bg", .{
+    .desc = "Continue a stopped job in the background.",
+    .args = .{
+        .job = args.StringPositional(.{ .desc = "Job ID", .default = "" }),
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    const job_id = state.jobs.resolveJob(cmd.argv, "bg", true) orelse return 1;
+pub const builtin = builtins.fromSpec(spec, run);
+
+fn run(state: *builtins.State, r: spec.Result) u8 {
+    const job_id = state.jobs.resolveJob(r.job, "bg", true) orelse return 1;
     return exec.continueJobBackground(state, job_id);
 }

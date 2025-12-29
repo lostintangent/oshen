@@ -172,7 +172,6 @@ pub const CommandStatement = struct {
     capture: ?Capture,
 };
 
-
 // =============================================================================
 // Statements and Program
 // =============================================================================
@@ -199,7 +198,7 @@ pub const Statement = union(enum) {
     /// Stores the pre-parsed command (always has background=false, capture=null).
     @"defer": CommandStatement,
     /// Exit the shell with optional status code (raw source, expanded at runtime)
-    @"exit": ?[]const u8,
+    exit: ?[]const u8,
 };
 
 /// The top-level AST node representing a complete program.

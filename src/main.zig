@@ -43,11 +43,8 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const opts = cli.parseArgs(args) catch |err| {
-        switch (err) {
-            error.MissingCommandArg => io.writeStderr("oshen: -c requires a command argument\n"),
-            error.UnknownOption => io.writeStderr("oshen: unknown option. Try --help\n"),
-        }
+    const opts = cli.parseArgs(args) catch {
+        // Error already printed by args parser
         std.process.exit(1);
     } orelse {
         // Help or version was printed, exit successfully
@@ -133,6 +130,37 @@ fn runPathHelper(allocator: std.mem.Allocator) void {
 // =============================================================================
 
 test {
-    // Integration tests and additional module tests
-    _ = @import("tests.zig");
+    // Include modules with tests that aren't in the main import graph
+    // Language
+    _ = @import("language/lexer.zig");
+    _ = @import("language/parser.zig");
+
+    // Interpreter
+    _ = @import("interpreter/expansion/glob.zig");
+    _ = @import("interpreter/expansion/word.zig");
+    _ = @import("interpreter/expansion/statement.zig");
+
+    // Runtime
+    _ = @import("runtime/state.zig");
+    _ = @import("runtime/scope.zig");
+    _ = @import("runtime/jobs.zig");
+    _ = @import("runtime/builtins/calc.zig");
+    _ = @import("runtime/builtins/export.zig");
+    _ = @import("runtime/builtins/increment.zig");
+    _ = @import("runtime/builtins/string.zig");
+    _ = @import("runtime/builtins/terminal.zig");
+    _ = @import("runtime/builtins/test.zig");
+
+    // Terminal
+    _ = @import("terminal/args.zig");
+    _ = @import("terminal/io/writer.zig");
+
+    // REPL
+    _ = @import("repl/editor/editor.zig");
+    _ = @import("repl/editor/history.zig");
+    _ = @import("repl/editor/ui/complete.zig");
+    _ = @import("repl/editor/ui/highlight.zig");
+    _ = @import("repl/editor/ui/suggest.zig");
+    _ = @import("repl/prompt.zig");
+    _ = @import("repl/repl.zig");
 }

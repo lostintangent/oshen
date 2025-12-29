@@ -168,70 +168,36 @@ pub const Scope = struct {
 
 const testing = std.testing;
 
-test "Scope: set and get scalar" {
+// -----------------------------------------------------------------------------
+// Basic Operations
+// -----------------------------------------------------------------------------
+
+test "Scope: scalar and list values" {
     var scope = Scope.init(null, testing.allocator);
     defer scope.deinit();
 
+    // Scalar
     try scope.setLocalScalar("foo", "bar");
-    const value = scope.get("foo");
-    try testing.expect(value != null);
-    try testing.expectEqualStrings("bar", value.?.asScalar().?);
-}
+    try testing.expectEqualStrings("bar", scope.get("foo").?.asScalar().?);
 
-test "Scope: set and get list" {
-    var scope = Scope.init(null, testing.allocator);
-    defer scope.deinit();
-
+    // List
     const items = [_][]const u8{ "a", "b", "c" };
     try scope.setLocalList("xs", &items);
-
     var value = scope.get("xs").?;
     const list = value.asList();
     try testing.expectEqual(@as(usize, 3), list.len);
     try testing.expectEqualStrings("a", list[0]);
-    try testing.expectEqualStrings("b", list[1]);
-    try testing.expectEqualStrings("c", list[2]);
+
+    // Scalar asList returns single element
+    var scalar = scope.get("foo").?;
+    try testing.expectEqual(@as(usize, 1), scalar.asList().len);
+
+    // Update existing value
+    try scope.setLocalScalar("foo", "updated");
+    try testing.expectEqualStrings("updated", scope.get("foo").?.asScalar().?);
 }
 
-test "Scope: parent chain lookup" {
-    var parent = Scope.init(null, testing.allocator);
-    defer parent.deinit();
-
-    var child = Scope.init(&parent, testing.allocator);
-    defer child.deinit();
-
-    try parent.setLocalScalar("outer", "parent_value");
-    try child.setLocalScalar("inner", "child_value");
-
-    // Child can see its own var
-    try testing.expect(child.get("inner") != null);
-
-    // Child can see parent's var
-    try testing.expect(child.get("outer") != null);
-    try testing.expectEqualStrings("parent_value", child.get("outer").?.asScalar().?);
-
-    // Parent cannot see child's var
-    try testing.expect(parent.get("inner") == null);
-}
-
-test "Scope: shadowing" {
-    var parent = Scope.init(null, testing.allocator);
-    defer parent.deinit();
-
-    var child = Scope.init(&parent, testing.allocator);
-    defer child.deinit();
-
-    try parent.setLocalScalar("x", "outer");
-    try child.setLocalScalar("x", "inner");
-
-    // Child sees its own version
-    try testing.expectEqualStrings("inner", child.get("x").?.asScalar().?);
-
-    // Parent sees its own version
-    try testing.expectEqualStrings("outer", parent.get("x").?.asScalar().?);
-}
-
-test "Scope: reset clears vars but retains capacity" {
+test "Scope: reset clears variables" {
     var scope = Scope.init(null, testing.allocator);
     defer scope.deinit();
 
@@ -239,49 +205,45 @@ test "Scope: reset clears vars but retains capacity" {
     try testing.expect(scope.get("foo") != null);
 
     scope.reset();
-
-    // Variable should be gone after reset
     try testing.expect(scope.get("foo") == null);
+}
+
+// -----------------------------------------------------------------------------
+// Scope Chain
+// -----------------------------------------------------------------------------
+
+test "Scope: parent chain lookup and shadowing" {
+    var parent = Scope.init(null, testing.allocator);
+    defer parent.deinit();
+    var child = Scope.init(&parent, testing.allocator);
+    defer child.deinit();
+
+    try parent.setLocalScalar("outer", "parent_value");
+    try child.setLocalScalar("inner", "child_value");
+
+    // Child sees both scopes
+    try testing.expectEqualStrings("child_value", child.get("inner").?.asScalar().?);
+    try testing.expectEqualStrings("parent_value", child.get("outer").?.asScalar().?);
+
+    // Parent cannot see child's var
+    try testing.expect(parent.get("inner") == null);
+
+    // Shadowing: child can shadow parent's variable
+    try child.setLocalScalar("outer", "shadowed");
+    try testing.expectEqualStrings("shadowed", child.get("outer").?.asScalar().?);
+    try testing.expectEqualStrings("parent_value", parent.get("outer").?.asScalar().?);
 }
 
 test "Scope: findScope locates defining scope" {
     var parent = Scope.init(null, testing.allocator);
     defer parent.deinit();
-
     var child = Scope.init(&parent, testing.allocator);
     defer child.deinit();
 
     try parent.setLocalScalar("outer", "value");
     try child.setLocalScalar("inner", "value");
 
-    // inner is defined in child
     try testing.expect(child.findScope("inner") == &child);
-
-    // outer is defined in parent
     try testing.expect(child.findScope("outer") == &parent);
-
-    // nonexistent returns null
-    try testing.expect(child.findScope("nope") == null);
-}
-
-test "Scope: update existing value" {
-    var scope = Scope.init(null, testing.allocator);
-    defer scope.deinit();
-
-    try scope.setLocalScalar("x", "first");
-    try testing.expectEqualStrings("first", scope.get("x").?.asScalar().?);
-
-    try scope.setLocalScalar("x", "second");
-    try testing.expectEqualStrings("second", scope.get("x").?.asScalar().?);
-}
-
-test "Scope: scalar asList returns single element" {
-    var scope = Scope.init(null, testing.allocator);
-    defer scope.deinit();
-
-    try scope.setLocalScalar("x", "hello");
-    var value = scope.get("x").?;
-    const list = value.asList();
-    try testing.expectEqual(@as(usize, 1), list.len);
-    try testing.expectEqualStrings("hello", list[0]);
+    try testing.expect(child.findScope("nonexistent") == null);
 }

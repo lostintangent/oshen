@@ -131,21 +131,26 @@ pub const JobTable = struct {
         }
     }
 
-    /// Update job status based on waitpid results
-    pub fn updateStatus(self: *JobTable, pid: std.posix.pid_t, wait_status: u32) void {
+    /// Check if a PID belongs to any job in the table
+    pub fn findByPid(self: *JobTable, pid: std.posix.pid_t) ?*Job {
         for (&self.jobs) |*slot| {
             if (slot.*) |*job| {
                 for (job.pids) |job_pid| {
-                    if (job_pid == pid) {
-                        if (std.posix.W.IFSTOPPED(wait_status)) {
-                            job.status = .stopped;
-                        } else {
-                            // Process exited or was killed
-                            job.status = .done;
-                        }
-                        return;
-                    }
+                    if (job_pid == pid) return job;
                 }
+            }
+        }
+        return null;
+    }
+
+    /// Update job status based on waitpid results
+    pub fn updateStatus(self: *JobTable, pid: std.posix.pid_t, wait_status: u32) void {
+        if (self.findByPid(pid)) |job| {
+            if (std.posix.W.IFSTOPPED(wait_status)) {
+                job.status = .stopped;
+            } else {
+                // Process exited or was killed
+                job.status = .done;
             }
         }
     }
@@ -183,8 +188,8 @@ pub const JobTable = struct {
     };
 
     /// Resolve a job ID from command arguments, or default to the most recent job
-    pub fn resolveJob(self: *JobTable, argv: []const []const u8, comptime cmd_name: []const u8, stopped_only: bool) ?u16 {
-        if (argv.len < 2) {
+    pub fn resolveJob(self: *JobTable, job_spec: []const u8, comptime cmd_name: []const u8, stopped_only: bool) ?u16 {
+        if (job_spec.len == 0) {
             // No argument - use most recent (optionally stopped) job
             if (stopped_only) {
                 var iterator = self.iter();
@@ -204,9 +209,8 @@ pub const JobTable = struct {
             return null;
         }
 
-        const arg = argv[1];
-        return std.fmt.parseInt(u16, arg, 10) catch {
-            io.printError("oshen: " ++ cmd_name ++ ": {s}: invalid job ID\n", .{arg});
+        return std.fmt.parseInt(u16, job_spec, 10) catch {
+            io.printError("oshen: " ++ cmd_name ++ ": {s}: invalid job ID\n", .{job_spec});
             return null;
         };
     }
@@ -218,79 +222,39 @@ pub const JobTable = struct {
 
 const testing = std.testing;
 
-test "job table: add and get job" {
+// -----------------------------------------------------------------------------
+// Basic Operations
+// -----------------------------------------------------------------------------
+
+test "JobTable: add, get, and remove" {
     var table = JobTable.init(testing.allocator);
     defer table.deinit();
 
+    // Add single job
     const pids = [_]std.posix.pid_t{1234};
     const job_id = try table.add(1234, &pids, "sleep 10 &", .running);
-
     try testing.expectEqual(@as(u16, 1), job_id);
 
     const job = table.get(job_id).?;
-    try testing.expectEqual(@as(u16, 1), job.id);
     try testing.expectEqual(@as(std.posix.pid_t, 1234), job.pgid);
     try testing.expectEqualStrings("sleep 10 &", job.cmd);
     try testing.expectEqual(JobStatus.running, job.status);
-}
 
-test "job table: get nonexistent job returns null" {
-    var table = JobTable.init(testing.allocator);
-    defer table.deinit();
+    // Add pipeline job (multiple pids)
+    const pipeline_pids = [_]std.posix.pid_t{ 100, 200, 300 };
+    const pipeline_id = try table.add(100, &pipeline_pids, "cat | grep | wc", .running);
+    try testing.expectEqual(@as(usize, 3), table.get(pipeline_id).?.pids.len);
 
-    try testing.expectEqual(@as(?*Job, null), table.get(999));
-}
-
-test "job table: remove job" {
-    var table = JobTable.init(testing.allocator);
-    defer table.deinit();
-
-    const pids = [_]std.posix.pid_t{1234};
-    const job_id = try table.add(1234, &pids, "sleep 10", .running);
-
-    try testing.expect(table.get(job_id) != null);
-
+    // Remove job
     table.remove(job_id);
+    try testing.expect(table.get(job_id) == null);
 
-    try testing.expectEqual(@as(?*Job, null), table.get(job_id));
+    // Get/remove nonexistent is safe
+    try testing.expect(table.get(999) == null);
+    table.remove(999);
 }
 
-test "job table: getMostRecent" {
-    var table = JobTable.init(testing.allocator);
-    defer table.deinit();
-
-    const pids1 = [_]std.posix.pid_t{1000};
-    const pids2 = [_]std.posix.pid_t{2000};
-    const pids3 = [_]std.posix.pid_t{3000};
-
-    _ = try table.add(1000, &pids1, "job1", .running);
-    _ = try table.add(2000, &pids2, "job2", .running);
-    const job3_id = try table.add(3000, &pids3, "job3", .stopped);
-
-    const most_recent = table.getMostRecent().?;
-    try testing.expectEqual(job3_id, most_recent.id);
-}
-
-test "job table: iterate jobs" {
-    var table = JobTable.init(testing.allocator);
-    defer table.deinit();
-
-    const pids1 = [_]std.posix.pid_t{100};
-    const pids2 = [_]std.posix.pid_t{200};
-
-    _ = try table.add(100, &pids1, "cmd1", .running);
-    _ = try table.add(200, &pids2, "cmd2", .stopped);
-
-    var count: usize = 0;
-    var iterator = table.iter();
-    while (iterator.next()) |_| {
-        count += 1;
-    }
-
-    try testing.expectEqual(@as(usize, 2), count);
-}
-
-test "job table: countActive" {
+test "JobTable: ID increments and slot reuse" {
     var table = JobTable.init(testing.allocator);
     defer table.deinit();
 
@@ -298,25 +262,98 @@ test "job table: countActive" {
     const pids2 = [_]std.posix.pid_t{200};
     const pids3 = [_]std.posix.pid_t{300};
 
-    _ = try table.add(100, &pids1, "cmd1", .running);
-    _ = try table.add(200, &pids2, "cmd2", .stopped);
-    _ = try table.add(300, &pids3, "cmd3", .done);
+    const id1 = try table.add(100, &pids1, "cmd1", .running);
+    const id2 = try table.add(200, &pids2, "cmd2", .running);
+    try testing.expectEqual(@as(u16, 1), id1);
+    try testing.expectEqual(@as(u16, 2), id2);
 
-    // Only running and stopped are "active"
+    // Remove and add - slot reused but ID continues
+    table.remove(id1);
+    const id3 = try table.add(300, &pids3, "cmd3", .running);
+    try testing.expectEqual(@as(u16, 3), id3);
     try testing.expectEqual(@as(usize, 2), table.countActive());
 }
 
-test "job table: updateStatus" {
+// -----------------------------------------------------------------------------
+// Queries
+// -----------------------------------------------------------------------------
+
+test "JobTable: getMostRecent and iteration" {
     var table = JobTable.init(testing.allocator);
     defer table.deinit();
 
+    // Empty table
+    try testing.expect(table.getMostRecent() == null);
+
+    const pids1 = [_]std.posix.pid_t{100};
+    const pids2 = [_]std.posix.pid_t{200};
+    const pids3 = [_]std.posix.pid_t{300};
+
+    _ = try table.add(100, &pids1, "job1", .running);
+    _ = try table.add(200, &pids2, "job2", .running);
+    const id3 = try table.add(300, &pids3, "job3", .stopped);
+
+    // getMostRecent returns highest ID
+    try testing.expectEqual(id3, table.getMostRecent().?.id);
+
+    // Iterate counts all jobs
+    var count: usize = 0;
+    var iter = table.iter();
+    while (iter.next()) |_| count += 1;
+    try testing.expectEqual(@as(usize, 3), count);
+
+    // countActive excludes done jobs
+    _ = try table.add(400, &[_]std.posix.pid_t{400}, "done", .done);
+    try testing.expectEqual(@as(usize, 3), table.countActive());
+}
+
+// -----------------------------------------------------------------------------
+// Status Updates
+// -----------------------------------------------------------------------------
+
+test "JobTable: updateStatus" {
+    var table = JobTable.init(testing.allocator);
+    defer table.deinit();
+
+    // Single process job
     const pids = [_]std.posix.pid_t{1234};
     const job_id = try table.add(1234, &pids, "sleep", .running);
 
-    // Simulate process exit (WIFEXITED status)
-    const exit_status: u32 = 0; // Normal exit
-    table.updateStatus(1234, exit_status);
+    table.updateStatus(1234, 0); // exit status
+    try testing.expectEqual(JobStatus.done, table.get(job_id).?.status);
 
-    const job = table.get(job_id).?;
-    try testing.expectEqual(JobStatus.done, job.status);
+    // Pipeline job - any pid updates status
+    const pipeline_pids = [_]std.posix.pid_t{ 100, 200, 300 };
+    const pipeline_id = try table.add(100, &pipeline_pids, "cat | grep", .running);
+    table.updateStatus(200, 0);
+    try testing.expectEqual(JobStatus.done, table.get(pipeline_id).?.status);
+
+    // Unknown pid is safe
+    table.updateStatus(999, 0);
+}
+
+// -----------------------------------------------------------------------------
+// Edge Cases
+// -----------------------------------------------------------------------------
+
+test "JobTable: ID wraparound skips zero" {
+    var table = JobTable.init(testing.allocator);
+    defer table.deinit();
+
+    table.next_id = 65535;
+
+    const pids1 = [_]std.posix.pid_t{100};
+    const pids2 = [_]std.posix.pid_t{200};
+
+    try testing.expectEqual(@as(u16, 65535), try table.add(100, &pids1, "cmd1", .running));
+    try testing.expectEqual(@as(u16, 1), try table.add(200, &pids2, "cmd2", .running));
+}
+
+test "JobStatus: str returns correct strings" {
+    const cases = [_]struct { JobStatus, []const u8 }{
+        .{ .running, "Running" },
+        .{ .stopped, "Stopped" },
+        .{ .done, "Done" },
+    };
+    for (cases) |c| try testing.expectEqualStrings(c[1], c[0].str());
 }

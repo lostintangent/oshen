@@ -33,12 +33,10 @@ fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
 
     // Join arguments with spaces: ["2", "+", "3"] → "2 + 3"
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    for (args, 0..) |arg, i| {
-        if (i > 0) stream.writer().writeByte(' ') catch break;
-        stream.writer().writeAll(arg) catch break;
-    }
-    const expr = stream.getWritten();
+    const expr = builtins.joinArgsToBuffer(args, &buf) orelse {
+        builtins.io.printError("{s}: expression too long\n", .{cmd.argv[0]});
+        return 1;
+    };
 
     // Parse and evaluate
     var parser = Parser.init(expr);
@@ -160,6 +158,7 @@ const Parser = struct {
             self.advance();
             return result;
         }
+        if (c == ')') return error.UnmatchedParen;
         return self.number();
     }
 
@@ -190,6 +189,12 @@ const Parser = struct {
 // =============================================================================
 // Tests
 // =============================================================================
+//
+// NOTE: Basic arithmetic, precedence, x operator, and unary minus are covered
+// by e2e.wave (lines 642-680). These unit tests focus on:
+// - Parser edge cases (whitespace, deeply nested parens)
+// - Error handling (division by zero, unmatched parens, invalid input, overflow)
+// - Left-to-right associativity
 
 const testing = std.testing;
 
@@ -198,63 +203,95 @@ fn eval(input: []const u8) ParseError!i64 {
     return p.parse();
 }
 
-test "ops: basic arithmetic" {
-    try testing.expectEqual(@as(i64, 5), try eval("2 + 3"));
-    try testing.expectEqual(@as(i64, 7), try eval("10 - 3"));
-    try testing.expectEqual(@as(i64, 20), try eval("4 * 5"));
-    try testing.expectEqual(@as(i64, 20), try eval("4 x 5")); // x as multiplication
-    try testing.expectEqual(@as(i64, 5), try eval("20 / 4"));
-    try testing.expectEqual(@as(i64, 2), try eval("17 % 5"));
+// -----------------------------------------------------------------------------
+// Calc: associativity and precedence
+// -----------------------------------------------------------------------------
+
+test "Calc: associativity and precedence" {
+    const cases = .{
+        // left-to-right same-level operators
+        .{ "10 - 5 - 3", @as(i64, 2) }, // (10 - 5) - 3 = 2
+        .{ "24 / 4 / 3", @as(i64, 2) }, // (24 / 4) / 3 = 2
+        // modulo same as multiplication/division
+        .{ "2 * 7 % 4", @as(i64, 2) }, // (2 * 7) % 4 = 14 % 4 = 2
+    };
+    inline for (cases) |case| {
+        try testing.expectEqual(case[1], try eval(case[0]));
+    }
 }
 
-test "ops: precedence" {
-    try testing.expectEqual(@as(i64, 14), try eval("2 + 3 * 4"));
-    try testing.expectEqual(@as(i64, 14), try eval("2 + 3 x 4")); // x has same precedence
-    try testing.expectEqual(@as(i64, 4), try eval("10 - 2 * 3"));
-    try testing.expectEqual(@as(i64, 4), try eval("10 - 2 x 3"));
+// -----------------------------------------------------------------------------
+// Calc: parser edge cases
+// -----------------------------------------------------------------------------
+
+test "Calc: parser edge cases" {
+    const cases = .{
+        // deeply nested parens
+        .{ "(((10)))", @as(i64, 10) },
+        .{ "((1 + 2) * (1 + 1))", @as(i64, 6) },
+        // whitespace variations
+        .{ "  2 + 3  ", @as(i64, 5) },
+        .{ "2+3", @as(i64, 5) },
+        .{ "2+3*4", @as(i64, 14) },
+        // unary minus
+        .{ "--5", @as(i64, 5) }, // double minus
+        .{ "---5", @as(i64, -5) }, // triple minus
+        .{ "-(2 + 3)", @as(i64, -5) }, // negate parenthesized
+        // x multiplication whitespace
+        .{ "2x3", @as(i64, 6) },
+        .{ "2 x3", @as(i64, 6) },
+        .{ "2x 3", @as(i64, 6) },
+    };
+    inline for (cases) |case| {
+        try testing.expectEqual(case[1], try eval(case[0]));
+    }
 }
 
-test "ops: parentheses" {
-    try testing.expectEqual(@as(i64, 20), try eval("(2 + 3) * 4"));
-    try testing.expectEqual(@as(i64, 20), try eval("(2 + 3) x 4")); // x with parens
-    try testing.expectEqual(@as(i64, 5), try eval("((2 + 3))"));
+// -----------------------------------------------------------------------------
+// Calc: error cases
+// -----------------------------------------------------------------------------
+
+test "Calc: error cases" {
+    const cases = .{
+        // division by zero
+        .{ "5 / 0", error.DivisionByZero },
+        .{ "5 % 0", error.DivisionByZero },
+        // unmatched parentheses
+        .{ "(2 + 3", error.UnmatchedParen },
+        .{ ")", error.UnmatchedParen },
+        .{ "((2 + 3)", error.UnmatchedParen },
+        // invalid input
+        .{ "abc", error.InvalidNumber },
+        .{ "2 + 3 abc", error.InvalidNumber }, // trailing garbage
+        // empty input
+        .{ "", error.UnexpectedEnd },
+        .{ "   ", error.UnexpectedEnd },
+        // incomplete expression
+        .{ "2 +", error.UnexpectedEnd },
+    };
+    inline for (cases) |case| {
+        try testing.expectError(case[1], eval(case[0]));
+    }
 }
 
-test "ops: x multiplication" {
-    try testing.expectEqual(@as(i64, 6), try eval("2 x 3"));
-    try testing.expectEqual(@as(i64, 24), try eval("2 x 3 x 4"));
-    try testing.expectEqual(@as(i64, 50), try eval("10 x 5"));
-    try testing.expectEqual(@as(i64, 0), try eval("0 x 100"));
-    // x followed by digit (no space) should still work
-    try testing.expectEqual(@as(i64, 6), try eval("2 x3"));
-    try testing.expectEqual(@as(i64, 6), try eval("2x 3"));
-    try testing.expectEqual(@as(i64, 6), try eval("2x3"));
-}
+// -----------------------------------------------------------------------------
+// Calc: overflow handling
+// -----------------------------------------------------------------------------
 
-test "ops: unary minus" {
-    try testing.expectEqual(@as(i64, -5), try eval("-5"));
-    try testing.expectEqual(@as(i64, 5), try eval("--5"));
-    try testing.expectEqual(@as(i64, 1), try eval("3 + -2"));
-    try testing.expectEqual(@as(i64, -6), try eval("-2 x 3"));
-    try testing.expectEqual(@as(i64, -6), try eval("2 x -3"));
-}
+test "Calc: overflow handling" {
+    // i64 max = 9223372036854775807
+    // Note: the parser handles negative numbers as unary minus + positive number,
+    // so we test overflow through arithmetic operations
+    const cases = .{
+        .{ "9223372036854775807 + 1", error.Overflow }, // max + 1
+        .{ "9223372036854775807 * 2", error.Overflow }, // max * 2
+        .{ "0 - 9223372036854775807 - 2", error.Overflow }, // min - 1 (via subtraction)
+    };
+    inline for (cases) |case| {
+        try testing.expectError(case[1], eval(case[0]));
+    }
 
-test "ops: whitespace handling" {
-    try testing.expectEqual(@as(i64, 5), try eval("  2 + 3  "));
-    try testing.expectEqual(@as(i64, 5), try eval("2+3"));
-    try testing.expectEqual(@as(i64, 14), try eval("2+3*4"));
-}
-
-test "error: division by zero" {
-    try testing.expectError(error.DivisionByZero, eval("5 / 0"));
-    try testing.expectError(error.DivisionByZero, eval("5 % 0"));
-}
-
-test "error: invalid input" {
-    try testing.expectError(error.InvalidNumber, eval("+ 5"));
-    try testing.expectError(error.UnmatchedParen, eval("(2 + 3"));
-    try testing.expectError(error.InvalidNumber, eval("2 + 3 abc")); // trailing garbage
-    try testing.expectError(error.UnexpectedEnd, eval("")); // empty
-    try testing.expectError(error.UnexpectedEnd, eval("   ")); // whitespace only
-    try testing.expectError(error.UnmatchedParen, eval(")"));
+    // These should NOT overflow
+    try testing.expectEqual(@as(i64, 9223372036854775807), try eval("9223372036854775807"));
+    try testing.expectEqual(@as(i64, -9223372036854775807), try eval("0 - 9223372036854775807"));
 }

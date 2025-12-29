@@ -33,6 +33,56 @@ pub const EvalError = lexer.LexError || parser.ParseError || expand.ExpandError 
 /// Returns the exit status (0-255) of the executed command.
 pub const EvalFn = *const fn (std.mem.Allocator, *State, []const u8) EvalError!u8;
 
+// =============================================================================
+// Text utilities
+// =============================================================================
+
+/// Find the start of the word at or before the given position.
+/// Used for completion to determine what word is being typed.
+pub inline fn findWordStart(buf: []const u8, pos: usize) usize {
+    if (pos == 0) return 0;
+    var i = pos;
+    while (i > 0) {
+        i -= 1;
+        if (isWordBreak(buf[i])) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+/// Check if a character is a word break (whitespace).
+pub inline fn isWordBreak(c: u8) bool {
+    return c == ' ' or c == '\t';
+}
+
+/// Expand a tilde prefix to the home directory.
+/// Returns the expanded path in the provided buffer, or null on error.
+/// If the path doesn't start with ~, returns null.
+pub fn expandTilde(path: []const u8, home: []const u8, buf: []u8) ?[]const u8 {
+    if (path.len == 0 or path[0] != '~') return null;
+    if (path.len == 1 or path[1] == '/') {
+        const rest = if (path.len > 1) path[1..] else "";
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ home, rest }) catch null;
+    }
+    return null;
+}
+
+/// Contract a path by replacing the home directory prefix with ~.
+/// Returns the contracted path in the provided buffer, or the original path if no contraction.
+pub fn contractTilde(path: []const u8, home: []const u8, buf: []u8) []const u8 {
+    if (!std.mem.startsWith(u8, path, home)) return path;
+    if (path.len == home.len) return "~";
+    if (path[home.len] == '/') {
+        return std.fmt.bufPrint(buf, "~{s}", .{path[home.len..]}) catch path;
+    }
+    return path;
+}
+
+// =============================================================================
+// REPL
+// =============================================================================
+
 /// Run the interactive REPL
 pub fn run(allocator: std.mem.Allocator, state: *State, evalFn: EvalFn) !void {
     var editor = Editor.init(allocator);
@@ -84,10 +134,19 @@ pub fn run(allocator: std.mem.Allocator, state: *State, evalFn: EvalFn) !void {
         // (commands expect echo, line buffering, etc.)
         editor.restoreTerminal();
 
+        // Clear any stale interrupt flag before executing (could be set by Ctrl+C during prompt)
+        state.interrupted = false;
+
         // Execute the command
         _ = evalFn(allocator, state, line) catch |err| {
             io.printError("oshen: {}\n", .{err});
         };
+
+        // If command was interrupted, print ^C for visual feedback
+        if (state.interrupted) {
+            io.writeStderr("^C\n");
+            state.interrupted = false;
+        }
 
         // Add to history with context (CWD and exit status)
         const cwd = state.getCwd() catch "";
@@ -110,4 +169,60 @@ pub fn run(allocator: std.mem.Allocator, state: *State, evalFn: EvalFn) !void {
             break;
         }
     }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+// -----------------------------------------------------------------------------
+// Word Utilities
+// -----------------------------------------------------------------------------
+
+test "findWordStart: finds beginning of current word" {
+    const cases = [_]struct { []const u8, usize, usize }{
+        .{ "echo", 4, 0 }, // end of single word
+        .{ "echo hello", 10, 5 }, // end of second word
+        .{ "echo hello", 3, 0 }, // middle of first word
+        .{ "echo\thello", 10, 5 }, // tab separator
+    };
+    for (cases) |c| try testing.expectEqual(c[2], findWordStart(c[0], c[1]));
+}
+
+// -----------------------------------------------------------------------------
+// Tilde Utilities
+// -----------------------------------------------------------------------------
+
+test "expandTilde: expands ~ to home directory" {
+    var buf: [256]u8 = undefined;
+    const home = "/home/user";
+
+    const cases = [_]struct { []const u8, ?[]const u8 }{
+        .{ "~", "/home/user" }, // ~ alone
+        .{ "~/src/project", "/home/user/src/project" }, // ~/subpath
+        .{ "/usr/bin", null }, // absolute path (no expansion)
+        .{ "~other/path", null }, // ~username (unsupported)
+    };
+    for (cases) |c| {
+        if (c[1]) |expected| {
+            try testing.expectEqualStrings(expected, expandTilde(c[0], home, &buf).?);
+        } else {
+            try testing.expect(expandTilde(c[0], home, &buf) == null);
+        }
+    }
+}
+
+test "contractTilde: replaces home prefix with ~" {
+    var buf: [256]u8 = undefined;
+    const home = "/home/user";
+
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "/home/user", "~" }, // exact home
+        .{ "/home/user/src/project", "~/src/project" }, // with subpath
+        .{ "/usr/bin", "/usr/bin" }, // outside home (no contraction)
+        .{ "/home/username/foo", "/home/username/foo" }, // partial match (boundary check)
+    };
+    for (cases) |c| try testing.expectEqualStrings(c[1], contractTilde(c[0], home, &buf));
 }

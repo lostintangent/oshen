@@ -1,21 +1,20 @@
 //! source builtin - execute commands from a file
 const std = @import("std");
 const builtins = @import("../builtins.zig");
+const args = @import("../../terminal/args.zig");
 const interpreter = @import("../../interpreter/interpreter.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "source",
-    .run = run,
-    .help = "Execute commands from a file: source FILE",
-};
+const spec = args.Spec("source", .{
+    .desc = "Execute commands from a file.",
+    .args = .{
+        .file = args.StringPositional(.{ .desc = "Script file to execute" }),
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    if (cmd.argv.len < 2) {
-        builtins.io.writeStderr("source: usage: source FILE\n");
-        return 1;
-    }
+pub const builtin = builtins.fromSpec(spec, run);
 
-    const path = cmd.argv[1];
+fn run(state: *builtins.State, r: spec.Result) u8 {
+    const path = r.file;
 
     // Expand tilde if present
     var expanded_path: []const u8 = path;

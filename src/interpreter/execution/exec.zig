@@ -112,7 +112,7 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.S
             };
             return 0;
         },
-        .@"exit" => |opt_status_str| {
+        .exit => |opt_status_str| {
             state.should_exit = true;
             if (opt_status_str) |status_str| {
                 // Tokenize, expand, and parse the exit code at runtime
@@ -160,10 +160,13 @@ fn executeBody(allocator: std.mem.Allocator, state: *State, body: []const u8, co
     };
 }
 
-const LoopSignal = enum { break_, continue_, ret };
+const LoopSignal = enum { break_, continue_, ret, interrupt };
 
 fn consumeLoopSignal(state: *State) ?LoopSignal {
     if (state.fn_return) return .ret;
+    // Note: interrupted is NOT cleared here - it propagates through all loops
+    // and is only cleared by the REPL after command execution completes
+    if (state.interrupted) return .interrupt;
     if (state.loop_break) {
         state.loop_break = false;
         return .break_;
@@ -281,6 +284,7 @@ fn executeEachStatement(allocator: std.mem.Allocator, state: *State, stmt: expan
             .ret => return state.status,
             .break_ => break,
             .continue_ => continue,
+            .interrupt => return 130,
         };
     }
 
@@ -374,6 +378,7 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
             .ret => return state.status,
             .break_ => break,
             .continue_ => continue,
+            .interrupt => return 130,
         };
     }
 

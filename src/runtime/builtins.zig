@@ -11,6 +11,14 @@ pub const ExpandedCmd = @import("../interpreter/expansion/expanded.zig").Expande
 pub const io = @import("../terminal/io.zig");
 pub const env = @import("env.zig");
 
+// =============================================================================
+// Shared Utilities
+// =============================================================================
+
+/// Check if a string looks like a number (for argument parsing).
+/// Handles negative numbers: "-5" returns true, "--foo" returns false.
+pub const isNumeric = @import("../terminal/args.zig").isNumeric;
+
 /// Standard signature for all builtin commands
 pub const BuiltinFn = *const fn (*State, ExpandedCmd) u8;
 
@@ -20,6 +28,23 @@ pub const Builtin = struct {
     run: BuiltinFn,
     help: []const u8,
 };
+
+/// Create a Builtin from a Spec type - handles parsing automatically.
+/// The run function receives parsed args instead of raw ExpandedCmd.
+pub fn fromSpec(comptime S: type, comptime run_fn: *const fn (*State, S.Result) u8) Builtin {
+    const wrapper = struct {
+        fn run(st: *State, cmd: ExpandedCmd) u8 {
+            const parsed = S.parse(cmd.argv) catch return 1;
+            return run_fn(st, parsed);
+        }
+    };
+    return .{ .name = S.name, .run = wrapper.run, .help = S.help };
+}
+
+/// Create an alias for an existing builtin with a different name.
+pub fn alias(comptime b: Builtin, comptime name: []const u8) Builtin {
+    return .{ .name = name, .run = b.run, .help = b.help };
+}
 
 // Import individual builtin modules
 const cd_builtin = @import("builtins/cd.zig");
@@ -40,10 +65,12 @@ const print_builtin = @import("builtins/print.zig");
 const alias_builtin = @import("builtins/alias.zig");
 const unalias_builtin = @import("builtins/unalias.zig");
 const test_builtin = @import("builtins/test.zig");
-const path_prepend_builtin = @import("builtins/path_prepend.zig");
+const path_builtin = @import("builtins/path.zig");
 const calc_builtin = @import("builtins/calc.zig");
 const increment_builtin = @import("builtins/increment.zig");
 const terminal_builtin = @import("builtins/terminal.zig");
+const range_builtin = @import("builtins/range.zig");
+const string_builtin = @import("builtins/string.zig");
 
 /// All registered builtins - single source of truth
 const all_builtins = [_]Builtin{
@@ -67,11 +94,13 @@ const all_builtins = [_]Builtin{
     unalias_builtin.builtin,
     test_builtin.builtin,
     test_builtin.bracket_builtin,
-    path_prepend_builtin.builtin,
+    path_builtin.builtin,
     calc_builtin.builtin,
     calc_builtin.equals_builtin,
     increment_builtin.builtin,
     terminal_builtin.builtin,
+    range_builtin.builtin,
+    string_builtin.builtin,
 };
 
 /// Compile-time map for O(1) builtin lookup (built from all_builtins)
@@ -155,4 +184,21 @@ pub fn joinArgs(allocator: std.mem.Allocator, args: []const []const u8) ![]const
 pub fn reportOOM(comptime cmd_name: []const u8) u8 {
     io.writeStderr(cmd_name ++ ": out of memory\n");
     return 1;
+}
+
+/// Join arguments with spaces into a stack buffer (zero-allocation).
+/// Returns the joined slice, or null if buffer overflow.
+pub fn joinArgsToBuffer(args: []const []const u8, buf: []u8) ?[]const u8 {
+    var pos: usize = 0;
+    for (args, 0..) |arg, i| {
+        if (i > 0) {
+            if (pos >= buf.len) return null;
+            buf[pos] = ' ';
+            pos += 1;
+        }
+        if (pos + arg.len > buf.len) return null;
+        @memcpy(buf[pos..][0..arg.len], arg);
+        pos += arg.len;
+    }
+    return buf[0..pos];
 }

@@ -282,72 +282,94 @@ fn matchCharClass(pattern: []const u8, start: usize, ch: u8) ?usize {
 
 const testing = std.testing;
 
-test "globMatch: simple star" {
-    try testing.expect(globMatch("*.zig", "main.zig"));
-    try testing.expect(globMatch("*.zig", "test.zig"));
-    try testing.expect(!globMatch("*.zig", "main.c"));
-    try testing.expect(!globMatch("*.zig", "main.zigx"));
-}
+// -----------------------------------------------------------------------------
+// Glob Matching
+// -----------------------------------------------------------------------------
 
-test "globMatch: star at start" {
-    try testing.expect(globMatch("*test", "mytest"));
-    try testing.expect(globMatch("*test", "test"));
-    try testing.expect(!globMatch("*test", "testing"));
-}
-
-test "globMatch: star in middle" {
-    try testing.expect(globMatch("foo*bar", "foobar"));
-    try testing.expect(globMatch("foo*bar", "fooxbar"));
-    try testing.expect(globMatch("foo*bar", "fooxxxbar"));
-    try testing.expect(!globMatch("foo*bar", "foobaz"));
+test "globMatch: star patterns" {
+    const cases = [_]struct { []const u8, []const u8, bool }{
+        // Star at end
+        .{ "*.zig", "main.zig", true },
+        .{ "*.zig", "test.zig", true },
+        .{ "*.zig", "main.c", false },
+        .{ "*.zig", "main.zigx", false },
+        // Star at start
+        .{ "*test", "mytest", true },
+        .{ "*test", "test", true },
+        .{ "*test", "testing", false },
+        // Star in middle
+        .{ "foo*bar", "foobar", true },
+        .{ "foo*bar", "fooxbar", true },
+        .{ "foo*bar", "fooxxxbar", true },
+        .{ "foo*bar", "foobaz", false },
+        // Double star (acts like * in pattern matching)
+        .{ "**", "anything", true },
+        .{ "**", "", true },
+        .{ "**.zig", "main.zig", true },
+    };
+    for (cases) |c| try testing.expectEqual(c[2], globMatch(c[0], c[1]));
 }
 
 test "globMatch: question mark" {
-    try testing.expect(globMatch("?.zig", "a.zig"));
-    try testing.expect(!globMatch("?.zig", "ab.zig"));
-    try testing.expect(globMatch("test?.zig", "test1.zig"));
+    const cases = [_]struct { []const u8, []const u8, bool }{
+        .{ "?.zig", "a.zig", true },
+        .{ "?.zig", "ab.zig", false },
+        .{ "test?.zig", "test1.zig", true },
+    };
+    for (cases) |c| try testing.expectEqual(c[2], globMatch(c[0], c[1]));
 }
 
-test "globMatch: character class" {
-    try testing.expect(globMatch("[abc].txt", "a.txt"));
-    try testing.expect(globMatch("[abc].txt", "b.txt"));
-    try testing.expect(!globMatch("[abc].txt", "d.txt"));
-}
-
-test "globMatch: character range" {
-    try testing.expect(globMatch("[a-z].txt", "m.txt"));
-    try testing.expect(!globMatch("[a-z].txt", "M.txt"));
-    try testing.expect(globMatch("[0-9].txt", "5.txt"));
+test "globMatch: character class and range" {
+    const cases = [_]struct { []const u8, []const u8, bool }{
+        // Character class [abc]
+        .{ "[abc].txt", "a.txt", true },
+        .{ "[abc].txt", "b.txt", true },
+        .{ "[abc].txt", "d.txt", false },
+        // Character range [a-z]
+        .{ "[a-z].txt", "m.txt", true },
+        .{ "[a-z].txt", "M.txt", false },
+        .{ "[0-9].txt", "5.txt", true },
+        // Negated class [!abc] and [^abc]
+        .{ "[!abc].txt", "d.txt", true },
+        .{ "[!abc].txt", "a.txt", false },
+        .{ "[^xyz].txt", "a.txt", true },
+        .{ "[^xyz].txt", "x.txt", false },
+    };
+    for (cases) |c| try testing.expectEqual(c[2], globMatch(c[0], c[1]));
 }
 
 test "globMatch: exact match" {
-    try testing.expect(globMatch("exact", "exact"));
-    try testing.expect(!globMatch("exact", "exactx"));
-    try testing.expect(!globMatch("exactx", "exact"));
+    const cases = [_]struct { []const u8, []const u8, bool }{
+        .{ "exact", "exact", true },
+        .{ "exact", "exactx", false },
+        .{ "exactx", "exact", false },
+    };
+    for (cases) |c| try testing.expectEqual(c[2], globMatch(c[0], c[1]));
 }
 
+// -----------------------------------------------------------------------------
+// Metacharacter Detection
+// -----------------------------------------------------------------------------
+
 test "hasGlobChars: detects metacharacters" {
-    try testing.expect(hasGlobChars("*.txt"));
-    try testing.expect(hasGlobChars("file?.log"));
-    try testing.expect(hasGlobChars("[abc].md"));
-    try testing.expect(hasGlobChars("**/*.zig"));
-    try testing.expect(!hasGlobChars("plain.txt"));
-    try testing.expect(!hasGlobChars("no-globs-here"));
+    const cases = [_]struct { []const u8, bool }{
+        .{ "*.txt", true },
+        .{ "file?.log", true },
+        .{ "[abc].md", true },
+        .{ "**/*.zig", true },
+        .{ "plain.txt", false },
+        .{ "no-globs-here", false },
+    };
+    for (cases) |c| try testing.expectEqual(c[1], hasGlobChars(c[0]));
 }
 
 test "hasGlobChars: ignores escaped metacharacters" {
-    try testing.expect(!hasGlobChars("\\*.txt"));
-    try testing.expect(!hasGlobChars("file\\?.log"));
-    try testing.expect(!hasGlobChars("\\[abc\\].md"));
-    try testing.expect(hasGlobChars("\\*.txt*")); // escaped star, then real star
-    try testing.expect(!hasGlobChars("literal\\*asterisk"));
-}
-
-test "globMatch: double star matches path segments" {
-    // ** in globMatch itself just acts like * (matches any chars)
-    // The recursive directory traversal is handled by expandGlob/matchRecursive
-    try testing.expect(globMatch("**", "anything"));
-    try testing.expect(globMatch("**", ""));
-    try testing.expect(globMatch("**.zig", "main.zig"));
-    try testing.expect(globMatch("**.zig", "test.zig"));
+    const cases = [_]struct { []const u8, bool }{
+        .{ "\\*.txt", false },
+        .{ "file\\?.log", false },
+        .{ "\\[abc\\].md", false },
+        .{ "\\*.txt*", true }, // escaped star, then real star
+        .{ "literal\\*asterisk", false },
+    };
+    for (cases) |c| try testing.expectEqual(c[1], hasGlobChars(c[0]));
 }

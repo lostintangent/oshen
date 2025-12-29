@@ -1,38 +1,36 @@
-//! path_prepend builtin - prepend paths to a variable with deduplication
-//!
-//! Prepends new paths to the front of a PATH-style variable,
-//! automatically removing duplicates.
+//! path builtin - prepend paths to a variable with deduplication
+
+// TODO: Add other commands
 
 const std = @import("std");
 const builtins = @import("../builtins.zig");
+const args = @import("../../terminal/args.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "path_prepend",
-    .run = run,
-    .help = "path_prepend VAR PATH... - Prepend paths to variable (deduplicates)",
-};
+const spec = args.Spec("path", .{
+    .desc = "Prepend paths to a variable with deduplication.",
+    .args = .{
+        .variable = args.StringPositional(.{ .desc = "Variable name (e.g., PATH)" }),
+        .paths = args.Rest(.{ .desc = "Paths to prepend", .required = true }),
+    },
+    .examples = &.{
+        "path PATH /usr/local/bin   # Prepend to PATH",
+        "path PATH ~/bin ~/.local/bin",
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    const argv = cmd.argv;
+pub const builtin = builtins.fromSpec(spec, run);
 
-    if (argv.len < 3) {
-        builtins.io.writeStderr("path_prepend: usage: path_prepend VAR PATH...\n");
-        return 1;
-    }
+fn run(state: *builtins.State, r: spec.Result) u8 {
+    const current = state.getVar(r.variable) orelse "";
 
-    const var_name = argv[1];
-    const new_paths = argv[2..];
-
-    const current = state.getVar(var_name) orelse "";
-
-    const new_value = buildPathList(state.allocator, new_paths, current) catch {
-        return builtins.reportOOM("path_prepend");
+    const new_value = buildPathList(state.allocator, r.paths, current) catch {
+        return builtins.reportOOM("path");
     };
     defer state.allocator.free(new_value);
 
-    state.setVar(var_name, new_value) catch return builtins.reportOOM("path_prepend");
-    storeExport(state, var_name, new_value) catch return builtins.reportOOM("path_prepend");
-    builtins.env.set(state.allocator, var_name, new_value) catch return builtins.reportOOM("path_prepend");
+    state.setVar(r.variable, new_value) catch return builtins.reportOOM("path");
+    storeExport(state, r.variable, new_value) catch return builtins.reportOOM("path");
+    builtins.env.set(state.allocator, r.variable, new_value) catch return builtins.reportOOM("path");
 
     return 0;
 }
@@ -98,4 +96,3 @@ fn storeExport(state: *builtins.State, name: []const u8, value: []const u8) !voi
 
     try state.exports.put(key, val);
 }
-

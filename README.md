@@ -5,7 +5,7 @@ A modern shell with a great developer experience out-of-the-box:
 - **Zero-setup REPL** — Syntax highlighting, ghost text, tab completions, and a git-aware default prompt.
 - **Clean syntax** — Familiar control flow with [block-scoped variables](#variable-scoping), plus [`defer`](#defer) for automatic cleanup.
 - **Lists by default** — Variables, [globs](#glob-patterns), and [brace expansion](#brace-expansion) all produce lists, which can be enumerated, indexed, or sliced.
-- **Modern builtins** — [Colored output](#colored-output-with-print), [output capture](#output-capture), [arithmetic (`calc`/`=`)](#calc-expressions), [`increment`](#increment), [`path_prepend`](#path_prepend), and more!
+- **Modern builtins** — [Colored output](#colored-output-with-print), [output capture](#output-capture), [arithmetic (`calc`/`=`)](#calc-expressions), [`increment`](#increment), [`range`](#generating-sequences-with-range), [`string`](#string-manipulation-with-string), [`path_prepend`](#path_prepend), and more!
 - **Fast** — Carefully optimized to make real-world scripts and interactive use snappy.
 
 ---
@@ -1051,6 +1051,8 @@ Both syntaxes work—choose based on readability preference!
 | `jobs` | List background/stopped jobs |
 | `path_prepend VAR path...` | Prepend paths to a variable (deduplicates) |
 | `pwd [-t]` | Print working directory (`-t`: replace $HOME with ~) |
+| `range [FIRST] LAST [-s STEP]` | Print a sequence of numbers (auto-detects direction) |
+| `string [FLAGS...] STRING...` | String manipulation (transform, split, join, match, etc.) |
 | `var` / `set `[name [values...]]` | Get/set shell variables |
 | `source <file>` | Execute file in current shell |
 | `calc <expr>` / `= <expr>` | Evaluate arithmetic expression (+ - x * / %) |
@@ -1223,6 +1225,154 @@ increment score --by 50          # score = 150
 # Decrement
 var lives 3
 increment lives --by -1          # lives = 2
+```
+
+### Generating Sequences with `range`
+
+The `range` builtin prints sequences of numbers, perfect for loops and data generation:
+
+```sh
+range 5                          # 1 2 3 4 5 (newline-separated)
+range 3 7                        # 3 4 5 6 7
+range 10 1                       # 10 9 8 ... 1 (auto-detects countdown)
+range --step 2 1 10              # 1 3 5 7 9
+range -s 2 1 10                  # Same as above (short form)
+```
+
+**Syntax:**
+- `range LAST` — Count from 1 to LAST
+- `range FIRST LAST` — Count from FIRST to LAST
+- `range -s STEP FIRST LAST` — Count with custom step
+
+**Options:**
+| Option | Description |
+|--------|-------------|
+| `-s`, `--step N` | Increment between numbers (default: 1 or -1) |
+| `-S`, `--separator S` | Separator between numbers (default: newline) |
+
+**Examples:**
+```sh
+# Use in loops
+for i in (range 1 5)
+    print "Item $i"
+end
+
+# Custom separator
+range -S ", " 1 5                # 1, 2, 3, 4, 5
+
+# Generate test data
+for n in (range 100 1)
+    print "Countdown: $n"
+end
+```
+
+**Smart Direction Detection:**
+
+If FIRST > LAST and no step is given, `range` automatically counts down:
+```sh
+range 5 1                        # 5 4 3 2 1 (auto-detected)
+range --step -1 5 1              # Same, but explicit
+```
+
+### String Manipulation with `string`
+
+The `string` builtin provides powerful text processing with zero heap allocations:
+
+```sh
+string --upper "hello"           # HELLO
+string --lower "HELLO"           # hello
+string --trim "  hello  "        # hello
+string --reverse "hello"         # olleh
+```
+
+**Transform Flags (combinable):**
+
+| Flag | Description |
+|------|-------------|
+| `--upper` | Convert to uppercase |
+| `--lower` | Convert to lowercase |
+| `--trim` | Trim whitespace from both ends |
+| `--trim-left` | Trim whitespace from start |
+| `--trim-right` | Trim whitespace from end |
+| `--reverse` | Reverse the string |
+| `--length` | Output length instead of content |
+| `--escape` | Escape special shell characters |
+| `--unescape` | Process escape sequences (`\n`, `\t`, etc.) |
+
+```sh
+# Combine transforms
+string --trim --upper "  hello  "     # HELLO
+string --reverse --upper "hello"      # OLLEH
+
+# Get string length
+string --length "hello world"         # 11
+```
+
+**Operations:**
+
+| Operation | Description |
+|-----------|-------------|
+| `--split SEP` | Split by separator (one result per line) |
+| `--join SEP` | Join arguments with separator |
+| `--replace OLD NEW` | Replace all occurrences |
+| `--sub START [LEN]` | Substring (1-indexed, negative from end) |
+| `--repeat N` | Repeat N times |
+| `--match PATTERN` | Exit 0 if glob matches, 1 otherwise |
+| `--contains STR` | Exit 0 if substring found, 1 otherwise |
+
+```sh
+# Split and join
+string --split : "a:b:c"              # a\nb\nc
+string --join , a b c                 # a,b,c
+
+# Replace
+string --replace foo bar "foo is foo" # bar is bar
+
+# Substring (1-indexed)
+string --sub 2 3 "hello"              # ell (3 chars starting at position 2)
+string --sub -3 "hello"               # llo (last 3 characters)
+
+# Repeat
+string --repeat 3 "ab"                # ababab
+
+# Pattern matching (no output, just exit code)
+if string --match "*.txt" "$file"
+    print "It's a text file"
+end
+
+# Substring check (no output, just exit code)
+if string --contains "error" "$log"
+    print "Found an error!"
+end
+```
+
+**Padding and Truncation:**
+
+| Operation | Description |
+|-----------|-------------|
+| `--pad N [C]` | Right-pad to width N with char C (default: space) |
+| `--pad-left N [C]` | Left-pad to width N |
+| `--pad-center N [C]` | Center-pad to width N |
+| `--shorten N [ELLIPSIS]` | Truncate to N chars with ellipsis (default: ...) |
+
+```sh
+# Padding for alignment
+string --pad-left 8 0 "42"            # 00000042
+string --pad 10 "hello"               # "hello     "
+string --pad-center 10 "hi"           # "    hi    "
+
+# Truncation
+string --shorten 10 "Hello, World!"   # Hello, ...
+string --shorten 8 "..." "Too long"   # Too l...
+```
+
+**Stdin Support:**
+
+When no string arguments are given, `string` reads lines from stdin:
+
+```sh
+echo "hello" | string --upper        # HELLO
+cat file.txt | string --trim         # Trim each line
 ```
 
 ---

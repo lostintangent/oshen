@@ -1,11 +1,19 @@
 #!../../zig-out/bin/oshen
-# Benchmark: while loop with function call (100k iterations)
+# Shell benchmark: loops, functions, conditionals, globs, builtins
 
-fun inc
-    increment i
+fun process_file
+    if test $(calc $count % 2) -eq 0
+        set count $(calc $count + 2)
+    else
+        increment count
+    end
 end
 
 var i 0
-while test $i -lt 100000
-    inc
+while test $i -lt 100
+    set count 0
+    each f in /usr/bin/*
+        process_file
+    end
+    increment i
 end

@@ -41,6 +41,7 @@ pub fn resetSignalsToDefault() void {
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
+    std.posix.sigaction(std.posix.SIG.INT, &default_act, null);
     std.posix.sigaction(std.posix.SIG.TSTP, &default_act, null);
     std.posix.sigaction(std.posix.SIG.TTIN, &default_act, null);
     std.posix.sigaction(std.posix.SIG.TTOU, &default_act, null);
@@ -110,6 +111,14 @@ pub fn initSignals() void {
     std.posix.sigaction(std.posix.SIG.TTIN, &ignore_act, null);
     std.posix.sigaction(std.posix.SIG.TTOU, &ignore_act, null);
 
+    // Set up SIGINT handler to allow interrupting loops and builtins
+    const int_act = std.posix.Sigaction{
+        .handler = .{ .handler = sigintHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &int_act, null);
+
     // Set up SIGCHLD handler to reap children and update job status
     const chld_act = std.posix.Sigaction{
         .handler = .{ .handler = sigchldHandler },
@@ -120,16 +129,30 @@ pub fn initSignals() void {
 }
 
 fn sigchldHandler(_: c_int) callconv(.c) void {
-    // Reap all terminated children (non-blocking)
-    while (true) {
-        var status: u32 = 0;
-        const pid = posix.waitpid(-1, &status, posix.WNOHANG | posix.WUNTRACED);
-        if (pid <= 0) break;
+    // Reap terminated background jobs only (non-blocking).
+    // We specifically waitpid on each known background job PID rather than
+    // using waitpid(-1), which would also reap foreground children and steal
+    // their exit status from the foreground waiter.
+    const state = g_state orelse return;
 
-        // Update job status if we have state
-        if (g_state) |state| {
-            state.jobs.updateStatus(pid, status);
+    var iter = state.jobs.iter();
+    while (iter.next()) |job| {
+        if (job.status == .done) continue;
+
+        for (job.pids) |pid| {
+            var status: u32 = 0;
+            const result = posix.waitpid(pid, &status, posix.WNOHANG | posix.WUNTRACED);
+            if (result > 0) {
+                state.jobs.updateStatus(pid, status);
+            }
         }
+    }
+}
+
+fn sigintHandler(_: c_int) callconv(.c) void {
+    // Set the interrupted flag so loops can check and break
+    if (g_state) |state| {
+        state.interrupted = true;
     }
 }
 

@@ -95,20 +95,27 @@ pub const State = struct {
     /// Whether we're an interactive shell
     interactive: bool = false,
 
-    /// Flag to signal shell should exit
-    should_exit: bool = false,
+    // =========================================================================
+    // Control Flow Flags
+    //
+    // Five boolean flags signal the interpreter/REPL how to continue execution.
+    // They form a hierarchy from narrowest to broadest scope:
+    //
+    // | Flag            | Scope                           | Triggered By       |
+    // |-----------------|---------------------------------|--------------------|
+    // | `loop_continue` | One iteration                   | `continue`         |
+    // | `loop_break`    | One loop                        | `break`            |
+    // | `fn_return`     | One function (all loops inside) | `return`           |
+    // | `interrupted`   | One command (all functions)     | Ctrl+C (SIGINT)    |
+    // | `should_exit`   | Entire shell                    | `exit` builtin     |
+    // =========================================================================
 
-    /// Exit code to use when exiting
-    exit_code: u8 = 0,
-
-    /// Flag to signal loop should break
     loop_break: bool = false,
-
-    /// Flag to signal loop should continue to next iteration
     loop_continue: bool = false,
-
-    /// Flag to signal function should return
     fn_return: bool = false,
+    interrupted: bool = false,
+    should_exit: bool = false,
+    exit_code: u8 = 0,
 
     /// Stack of deferred commands (LIFO execution order).
     /// CommandStatements contain slices that point into the cached function AST.
@@ -477,393 +484,260 @@ pub const State = struct {
 
 const testing = std.testing;
 
-test "variables: set and get" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
+const TestContext = struct {
+    state: State,
 
-    try state.setVar("foo", "bar");
-    try testing.expectEqualStrings("bar", state.getVar("foo").?);
-}
+    fn init() TestContext {
+        return .{ .state = State.init(testing.allocator) };
+    }
 
-test "variables: set updates existing in outer scope" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
+    fn initScope(self: *TestContext) void {
+        self.state.initCurrentScope();
+    }
 
-    // Set in global scope
-    try state.setVar("x", "outer");
+    fn deinit(self: *TestContext) void {
+        self.state.deinit();
+    }
+};
 
-    // Push a new scope
-    _ = try state.pushScope();
+// -----------------------------------------------------------------------------
+// Variables
+// -----------------------------------------------------------------------------
 
-    // Set should update the outer scope's variable
-    try state.setVar("x", "modified");
+test "Variables: set, get, and update" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
 
-    // Check in inner scope
-    try testing.expectEqualStrings("modified", state.getVar("x").?);
+    // Basic set and get
+    try ctx.state.setVar("foo", "bar");
+    try testing.expectEqualStrings("bar", ctx.state.getVar("foo").?);
 
-    // Pop scope and check global
-    state.popScope();
-    try testing.expectEqualStrings("modified", state.getVar("x").?);
-}
-
-test "variables: new var in inner scope is local" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    // Push a new scope
-    _ = try state.pushScope();
-
-    // Set a NEW variable in inner scope
-    try state.setVar("local", "value");
-    try testing.expectEqualStrings("value", state.getVar("local").?);
-
-    // Pop scope - variable should be gone
-    state.popScope();
-    try testing.expect(state.getVar("local") == null);
-}
-
-test "variables: setLocalVar always creates in current scope" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    // Set in global scope
-    try state.setVar("x", "outer");
-
-    // Push a new scope
-    _ = try state.pushScope();
-
-    // setLocalVar creates in current scope even if var exists in outer
-    try state.setLocalVar("x", "shadowed");
-    try testing.expectEqualStrings("shadowed", state.getVar("x").?);
-
-    // Pop - should see outer value again
-    state.popScope();
-    try testing.expectEqualStrings("outer", state.getVar("x").?);
-}
-
-test "variables: unset removes variable" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    try state.setVar("foo", "bar");
-    try testing.expect(state.getVar("foo") != null);
-
-    state.unsetVar("foo");
-    try testing.expect(state.getVar("foo") == null);
-}
-
-test "variables: unset nonexistent is safe" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    // Should not panic or error
-    state.unsetVar("nonexistent");
-}
-
-test "variables: list operations" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
+    // List variable
     const values = [_][]const u8{ "a", "b", "c" };
-    try state.setVarList("xs", &values);
+    try ctx.state.setVarList("xs", &values);
+    try testing.expectEqual(@as(usize, 3), ctx.state.getVarList("xs").?.len);
+    try testing.expectEqualStrings("a", ctx.state.getVar("xs").?); // getVar returns first element
 
-    const list = state.getVarList("xs");
-    try testing.expect(list != null);
-    try testing.expectEqual(@as(usize, 3), list.?.len);
-    try testing.expectEqualStrings("a", list.?[0]);
+    // Unset
+    ctx.state.unsetVar("foo");
+    try testing.expect(ctx.state.getVar("foo") == null);
 
-    // getVar returns first element
-    try testing.expectEqualStrings("a", state.getVar("xs").?);
+    // Unset nonexistent is safe
+    ctx.state.unsetVar("nonexistent");
 }
 
-test "scope: push and pop" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
+test "Variables: scope semantics" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
 
-    const global = state.current_scope;
-    try testing.expect(global == &state.global_scope);
+    // Set in global scope
+    try ctx.state.setVar("x", "outer");
 
-    const inner = try state.pushScope();
-    try testing.expect(state.current_scope == inner);
+    // Push scope - setVar updates existing in outer scope
+    _ = try ctx.state.pushScope();
+    try ctx.state.setVar("x", "modified");
+    try testing.expectEqualStrings("modified", ctx.state.getVar("x").?);
+    ctx.state.popScope();
+    try testing.expectEqualStrings("modified", ctx.state.getVar("x").?);
+
+    // New var in inner scope is local
+    _ = try ctx.state.pushScope();
+    try ctx.state.setVar("local", "value");
+    try testing.expectEqualStrings("value", ctx.state.getVar("local").?);
+    ctx.state.popScope();
+    try testing.expect(ctx.state.getVar("local") == null);
+
+    // setLocalVar always creates in current scope (shadowing)
+    try ctx.state.setVar("y", "outer");
+    _ = try ctx.state.pushScope();
+    try ctx.state.setLocalVar("y", "shadowed");
+    try testing.expectEqualStrings("shadowed", ctx.state.getVar("y").?);
+    ctx.state.popScope();
+    try testing.expectEqualStrings("outer", ctx.state.getVar("y").?);
+}
+
+// -----------------------------------------------------------------------------
+// Functions
+// -----------------------------------------------------------------------------
+
+test "Functions: set, get, and redefine" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
+
+    // Set and get
+    try ctx.state.setFunction("greet", "echo hello");
+    try testing.expectEqualStrings("echo hello", ctx.state.getFunction("greet").?.source);
+
+    // Nonexistent returns null
+    try testing.expect(ctx.state.getFunction("nonexistent") == null);
+
+    // Redefinition replaces body
+    try ctx.state.setFunction("greet", "echo goodbye");
+    try testing.expectEqualStrings("echo goodbye", ctx.state.getFunction("greet").?.source);
+
+    // Multiple functions
+    try ctx.state.setFunction("foo", "echo foo");
+    try ctx.state.setFunction("bar", "echo bar");
+    try testing.expectEqualStrings("echo foo", ctx.state.getFunction("foo").?.source);
+    try testing.expectEqualStrings("echo bar", ctx.state.getFunction("bar").?.source);
+}
+
+// -----------------------------------------------------------------------------
+// Aliases
+// -----------------------------------------------------------------------------
+
+test "Aliases: set, get, and unset" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
+
+    // Set and get
+    try ctx.state.setAlias("ll", "ls -la");
+    try testing.expectEqualStrings("ls -la", ctx.state.getAlias("ll").?);
+
+    // Nonexistent returns null
+    try testing.expect(ctx.state.getAlias("nonexistent") == null);
+
+    // Redefinition replaces expansion
+    try ctx.state.setAlias("ll", "ls -lah");
+    try testing.expectEqualStrings("ls -lah", ctx.state.getAlias("ll").?);
+
+    // Unset
+    ctx.state.unsetAlias("ll");
+    try testing.expect(ctx.state.getAlias("ll") == null);
+
+    // Unset nonexistent is safe
+    ctx.state.unsetAlias("nonexistent");
+}
+
+// -----------------------------------------------------------------------------
+// Scope Management
+// -----------------------------------------------------------------------------
+
+test "Scope: push and pop" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
+
+    const global = ctx.state.current_scope;
+    try testing.expect(global == &ctx.state.global_scope);
+
+    const inner = try ctx.state.pushScope();
+    try testing.expect(ctx.state.current_scope == inner);
     try testing.expect(inner.parent == global);
 
-    state.popScope();
-    try testing.expect(state.current_scope == global);
+    ctx.state.popScope();
+    try testing.expect(ctx.state.current_scope == global);
 }
 
-test "scope: reset for loop optimization" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
+test "Scope: reset for loop optimization" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
 
-    const scope = try state.pushScope();
+    const scope = try ctx.state.pushScope();
 
-    // Simulate loop iterations
     for (0..3) |i| {
-        scope.reset(); // Clear vars, retain memory
-
+        scope.reset();
         var buf: [16]u8 = undefined;
         const idx = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
         try scope.setLocalScalar("i", idx);
     }
 
-    // After reset, only the last value remains
     try testing.expectEqualStrings("2", scope.getLocal("i").?.asScalar().?);
-
-    state.popScope();
+    ctx.state.popScope();
 }
 
-test "functions: set and get" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
+// -----------------------------------------------------------------------------
+// Scope Pool
+// -----------------------------------------------------------------------------
 
-    try state.setFunction("greet", "echo hello");
+test "Scope pool: acquire and release" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
 
-    const func = state.getFunction("greet");
-    try testing.expect(func != null);
-    try testing.expectEqualStrings("echo hello", func.?.source);
+    // Pool starts empty, acquire allocates new scope
+    try testing.expectEqual(@as(usize, 0), ctx.state.scope_pool.items.len);
+    const scope1 = try ctx.state.acquireScope();
+    try testing.expect(scope1 != &ctx.state.global_scope);
+
+    // Release adds to pool
+    ctx.state.releaseScope();
+    try testing.expectEqual(@as(usize, 1), ctx.state.scope_pool.items.len);
+
+    // Acquire reuses pooled scope
+    const scope2 = try ctx.state.acquireScope();
+    try testing.expect(scope2 == scope1);
+    try testing.expectEqual(@as(usize, 0), ctx.state.scope_pool.items.len);
+
+    ctx.state.releaseScope();
 }
 
-test "functions: get nonexistent returns null" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
+test "Scope pool: released scope is cleared" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(?*Function, null), state.getFunction("nonexistent"));
-}
-
-test "functions: redefinition replaces body" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    try state.setFunction("greet", "echo v1");
-    try state.setFunction("greet", "echo v2");
-
-    const func = state.getFunction("greet");
-    try testing.expectEqualStrings("echo v2", func.?.source);
-}
-
-test "functions: multiple functions" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    try state.setFunction("foo", "echo foo");
-    try state.setFunction("bar", "echo bar");
-    try state.setFunction("baz", "echo baz");
-
-    try testing.expectEqualStrings("echo foo", state.getFunction("foo").?.source);
-    try testing.expectEqualStrings("echo bar", state.getFunction("bar").?.source);
-    try testing.expectEqualStrings("echo baz", state.getFunction("baz").?.source);
-}
-
-test "aliases: set and get" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    try state.setAlias("ll", "ls -la");
-
-    const expansion = state.getAlias("ll");
-    try testing.expect(expansion != null);
-    try testing.expectEqualStrings("ls -la", expansion.?);
-}
-
-test "aliases: get nonexistent returns null" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    try testing.expectEqual(@as(?[]const u8, null), state.getAlias("nonexistent"));
-}
-
-test "aliases: redefinition replaces expansion" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    try state.setAlias("g", "git");
-    try state.setAlias("g", "git status");
-
-    const expansion = state.getAlias("g");
-    try testing.expectEqualStrings("git status", expansion.?);
-}
-
-test "aliases: unset removes alias" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    try state.setAlias("ll", "ls -la");
-    try testing.expect(state.getAlias("ll") != null);
-
-    state.unsetAlias("ll");
-    try testing.expect(!state.aliases.contains("ll"));
-}
-
-test "aliases: unset nonexistent is safe" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    // Should not panic or error
-    state.unsetAlias("nonexistent");
-}
-
-// =============================================================================
-// Scope Pool Tests
-// =============================================================================
-
-test "scope pool: acquire returns new scope when pool empty" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    // Pool starts empty
-    try testing.expectEqual(@as(usize, 0), state.scope_pool.items.len);
-
-    // Acquire should allocate a new scope
-    const scope = try state.acquireScope();
-    try testing.expect(scope != &state.global_scope);
-    try testing.expect(state.current_scope == scope);
-
-    // Release it back to pool
-    state.releaseScope();
-    try testing.expectEqual(@as(usize, 1), state.scope_pool.items.len);
-}
-
-test "scope pool: acquire reuses pooled scope" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    // Acquire and release to populate pool
-    const scope1 = try state.acquireScope();
-    const scope1_ptr = scope1;
-    state.releaseScope();
-
-    // Pool should have one scope
-    try testing.expectEqual(@as(usize, 1), state.scope_pool.items.len);
-
-    // Acquire again - should get the same scope back
-    const scope2 = try state.acquireScope();
-    try testing.expect(scope2 == scope1_ptr);
-
-    // Pool should be empty now
-    try testing.expectEqual(@as(usize, 0), state.scope_pool.items.len);
-
-    state.releaseScope();
-}
-
-test "scope pool: released scope has variables cleared" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    // Acquire scope and set a variable
-    const scope1 = try state.acquireScope();
+    const scope1 = try ctx.state.acquireScope();
     try scope1.setLocalScalar("foo", "bar");
     try testing.expect(scope1.getLocal("foo") != null);
 
-    // Release - variables should be cleared
-    state.releaseScope();
+    ctx.state.releaseScope();
 
-    // Acquire again - should be the same scope but empty
-    const scope2 = try state.acquireScope();
+    // Reacquired scope should be empty
+    const scope2 = try ctx.state.acquireScope();
     try testing.expect(scope2.getLocal("foo") == null);
 
-    state.releaseScope();
+    ctx.state.releaseScope();
 }
 
-test "scope pool: parent chain is correct after reuse" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
+test "Scope pool: parent chain preserved after reuse" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
 
-    // Set a variable in global scope
-    try state.setVar("global_var", "global_value");
+    try ctx.state.setVar("global_var", "value");
 
-    // Acquire, release, acquire again
-    _ = try state.acquireScope();
-    state.releaseScope();
+    _ = try ctx.state.acquireScope();
+    ctx.state.releaseScope();
 
-    const scope = try state.acquireScope();
+    const scope = try ctx.state.acquireScope();
+    try testing.expect(scope.parent == &ctx.state.global_scope);
+    try testing.expectEqualStrings("value", scope.get("global_var").?.asScalar().?);
 
-    // Reused scope should have global as parent
-    try testing.expect(scope.parent == &state.global_scope);
-
-    // Should be able to see global variable through parent chain
-    try testing.expect(scope.get("global_var") != null);
-    try testing.expectEqualStrings("global_value", scope.get("global_var").?.asScalar().?);
-
-    state.releaseScope();
+    ctx.state.releaseScope();
 }
 
-test "scope pool: size is limited" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
+test "Scope pool: nested scopes and size limit" {
+    var ctx = TestContext.init();
+    ctx.initScope();
+    defer ctx.deinit();
 
-    // Acquire and release many scopes (more than max pool size of 16)
-    for (0..20) |_| {
-        _ = try state.acquireScope();
-        state.releaseScope();
-    }
-
-    // Pool should be capped at max size
-    try testing.expect(state.scope_pool.items.len <= max_pooled_scopes);
-}
-
-test "scope pool: nested acquire/release works correctly" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    // Simulate nested if statements or function calls
-    const outer = try state.acquireScope();
+    // Nested acquire/release
+    const outer = try ctx.state.acquireScope();
     try outer.setLocalScalar("outer_var", "outer");
 
-    const inner = try state.acquireScope();
-    try inner.setLocalScalar("inner_var", "inner");
-
-    // Inner should see outer's variable through parent chain
+    const inner = try ctx.state.acquireScope();
     try testing.expect(inner.get("outer_var") != null);
-    try testing.expect(inner.get("inner_var") != null);
 
-    // Release inner
-    state.releaseScope();
-    try testing.expect(state.current_scope == outer);
+    ctx.state.releaseScope();
+    try testing.expect(ctx.state.current_scope == outer);
 
-    // Outer should still have its variable
-    try testing.expect(outer.getLocal("outer_var") != null);
-    // But not inner's variable
-    try testing.expect(outer.get("inner_var") == null);
+    ctx.state.releaseScope();
+    try testing.expectEqual(@as(usize, 2), ctx.state.scope_pool.items.len);
 
-    // Release outer
-    state.releaseScope();
-    try testing.expect(state.current_scope == &state.global_scope);
+    // Pool size is limited
+    for (0..20) |_| {
+        _ = try ctx.state.acquireScope();
+        ctx.state.releaseScope();
+    }
+    try testing.expect(ctx.state.scope_pool.items.len <= max_pooled_scopes);
 
-    // Pool should have 2 scopes now
-    try testing.expectEqual(@as(usize, 2), state.scope_pool.items.len);
-}
-
-test "scope pool: releaseScope on global scope is safe" {
-    var state = State.init(testing.allocator);
-    state.initCurrentScope();
-    defer state.deinit();
-
-    // Should not crash when trying to release global scope
-    state.releaseScope();
-    try testing.expect(state.current_scope == &state.global_scope);
-    try testing.expectEqual(@as(usize, 0), state.scope_pool.items.len);
+    // Release on global scope is safe
+    ctx.state.releaseScope();
+    try testing.expect(ctx.state.current_scope == &ctx.state.global_scope);
 }

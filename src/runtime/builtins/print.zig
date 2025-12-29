@@ -2,6 +2,7 @@
 //!
 //! Behaves like echo for plain text, but supports color flags that can be
 //! interleaved with text arguments. Automatically resets color at end.
+//! Uses buffered output for minimal syscalls.
 //!
 //! Usage: print [-n] [--color]... [text]...
 //! Examples:
@@ -13,6 +14,7 @@
 const std = @import("std");
 const builtins = @import("../builtins.zig");
 const ansi = @import("../../terminal/ansi.zig");
+const Writer = @import("../../terminal/io.zig").Writer;
 
 pub const builtin = builtins.Builtin{
     .name = "print",
@@ -50,19 +52,22 @@ fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
         args = args[1..];
     }
 
+    var w = Writer{};
+
     for (args) |arg| {
         if (styles.get(arg)) |code| {
-            builtins.io.writeStdout(code);
+            w.write(code);
         } else {
-            if (need_space) builtins.io.writeStdout(" ");
-            ansi.writeEscaped(arg);
+            if (need_space) w.writeByte(' ');
+            w.writeEscaped(arg);
             need_space = true;
         }
     }
 
     // Always reset to prevent color bleed
-    builtins.io.writeStdout(ansi.reset);
-    if (newline) builtins.io.writeStdout("\n");
+    w.write(ansi.reset);
+    if (newline) w.writeByte('\n');
 
+    w.flush();
     return 0;
 }

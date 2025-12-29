@@ -39,8 +39,4 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     })).step);
-
-    // Install steps
-    const local_install = b.addSystemCommand(&.{ "sudo", "zig", "build", "install", "--prefix", "/usr/local" });
-    b.step("local-install", "Install to /usr/local/bin (needs sudo)").dependOn(&local_install.step);
 }

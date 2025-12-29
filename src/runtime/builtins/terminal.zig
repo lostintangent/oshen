@@ -132,14 +132,17 @@ const disable_flags = std.StaticStringMap([]const u8).initComptime(.{
 });
 
 fn cmdEnable(args: []const []const u8) void {
-    for (args) |flag| {
-        if (enable_flags.get(flag)) |seq| io.writeStdout(seq);
-    }
+    applyFlagSequences(args, enable_flags);
 }
 
 fn cmdDisable(args: []const []const u8) void {
+    applyFlagSequences(args, disable_flags);
+}
+
+/// Apply escape sequences for matching flags from a flag map.
+fn applyFlagSequences(args: []const []const u8, comptime flag_map: anytype) void {
     for (args) |flag| {
-        if (disable_flags.get(flag)) |seq| io.writeStdout(seq);
+        if (flag_map.get(flag)) |seq| io.writeStdout(seq);
     }
 }
 
@@ -177,33 +180,128 @@ fn parseNextArg(args: []const []const u8, i: *usize) u16 {
 // =============================================================================
 // Tests
 // =============================================================================
+//
+// NOTE: Terminal output is pure string formatting (ANSI escape codes), similar
+// to highlight.zig. Unit tests verify flag lookups and argument parsing.
+// No E2E tests needed - escape sequences are TTY-dependent.
 
 const testing = std.testing;
 
-test "parseNextArg: valid number" {
-    const args = [_][]const u8{ "--up", "5" };
-    var i: usize = 0;
-    try testing.expectEqual(@as(u16, 5), parseNextArg(&args, &i));
-    try testing.expectEqual(@as(usize, 1), i); // index advanced
+// -----------------------------------------------------------------------------
+// Terminal: argument parsing
+// -----------------------------------------------------------------------------
+
+test "Terminal: parseNextArg" {
+    const cases = [_]struct {
+        args: []const []const u8,
+        expected_value: u16,
+        expected_index: usize,
+    }{
+        // valid numbers
+        .{ .args = &.{ "--up", "5" }, .expected_value = 5, .expected_index = 1 },
+        .{ .args = &.{ "--up", "999" }, .expected_value = 999, .expected_index = 1 },
+        .{ .args = &.{ "--up", "0" }, .expected_value = 0, .expected_index = 1 },
+        // missing/invalid - defaults to 1
+        .{ .args = &.{"--up"}, .expected_value = 1, .expected_index = 0 },
+        .{ .args = &.{ "--up", "--down" }, .expected_value = 1, .expected_index = 0 }, // next is flag
+        .{ .args = &.{ "--up", "abc" }, .expected_value = 1, .expected_index = 1 }, // invalid number
+        .{ .args = &.{ "--up", "-5" }, .expected_value = 1, .expected_index = 0 }, // negative
+    };
+    for (cases) |case| {
+        var i: usize = 0;
+        const value = parseNextArg(case.args, &i);
+        try testing.expectEqual(case.expected_value, value);
+        try testing.expectEqual(case.expected_index, i);
+    }
 }
 
-test "parseNextArg: missing arg defaults to 1" {
-    const args = [_][]const u8{"--up"};
-    var i: usize = 0;
-    try testing.expectEqual(@as(u16, 1), parseNextArg(&args, &i));
-    try testing.expectEqual(@as(usize, 0), i); // index not advanced
+// -----------------------------------------------------------------------------
+// Terminal: command dispatch
+// -----------------------------------------------------------------------------
+
+test "Terminal: command lookup" {
+    // valid commands
+    const valid_cmds = [_][]const u8{ "save", "restore", "move", "clear", "enable", "disable", "title" };
+    for (valid_cmds) |cmd| {
+        try testing.expect(commands.get(cmd) != null);
+    }
+    // invalid commands
+    try testing.expectEqual(@as(?Command, null), commands.get("invalid"));
+    try testing.expectEqual(@as(?Command, null), commands.get(""));
+    try testing.expectEqual(@as(?Command, null), commands.get("SAVE")); // case sensitive
 }
 
-test "parseNextArg: next arg is flag, defaults to 1" {
-    const args = [_][]const u8{ "--up", "--down" };
-    var i: usize = 0;
-    try testing.expectEqual(@as(u16, 1), parseNextArg(&args, &i));
-    try testing.expectEqual(@as(usize, 0), i); // index not advanced
+// -----------------------------------------------------------------------------
+// Terminal: flag mappings
+// -----------------------------------------------------------------------------
+
+test "Terminal: move flags" {
+    const cases = .{
+        .{ "--up", @as(?u8, 'A') },
+        .{ "--down", @as(?u8, 'B') },
+        .{ "--right", @as(?u8, 'C') },
+        .{ "--left", @as(?u8, 'D') },
+        .{ "--home", @as(?u8, null) }, // handled separately
+        .{ "up", @as(?u8, null) }, // missing --
+        .{ "--diagonal", @as(?u8, null) }, // invalid
+    };
+    inline for (cases) |case| {
+        try testing.expectEqual(case[1], move_flags.get(case[0]));
+    }
 }
 
-test "parseNextArg: invalid number defaults to 1" {
-    const args = [_][]const u8{ "--up", "abc" };
-    var i: usize = 0;
-    try testing.expectEqual(@as(u16, 1), parseNextArg(&args, &i));
-    try testing.expectEqual(@as(usize, 1), i); // index advanced (consumed the arg)
+test "Terminal: clear flags" {
+    // valid flags produce non-null sequences
+    try testing.expect(clear_flags.get("--screen") != null);
+    try testing.expect(clear_flags.get("--below") != null);
+    try testing.expect(clear_flags.get("--all") != null);
+    // --lines is handled separately (needs arg parsing)
+    try testing.expectEqual(@as(?[]const u8, null), clear_flags.get("--lines"));
+}
+
+test "Terminal: enable/disable flags" {
+    const flags = [_][]const u8{ "--cursor", "--mouse", "--focus", "--alternate" };
+    for (flags) |flag| {
+        // both enable and disable have mappings
+        const enable_seq = enable_flags.get(flag);
+        const disable_seq = disable_flags.get(flag);
+        try testing.expect(enable_seq != null);
+        try testing.expect(disable_seq != null);
+        // and they produce different sequences
+        try testing.expect(!std.mem.eql(u8, enable_seq.?, disable_seq.?));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Terminal: ANSI sequence validation
+// -----------------------------------------------------------------------------
+
+test "Terminal: ANSI sequences are non-empty" {
+    // cursor
+    try testing.expect(ansi.cursor_save.len > 0);
+    try testing.expect(ansi.cursor_restore.len > 0);
+    try testing.expect(ansi.cursor_home.len > 0);
+    try testing.expect(ansi.cursor_show.len > 0);
+    try testing.expect(ansi.cursor_hide.len > 0);
+    // clear
+    try testing.expect(ansi.clear_line.len > 0);
+    try testing.expect(ansi.clear_screen.len > 0);
+    try testing.expect(ansi.clear_below.len > 0);
+    try testing.expect(ansi.clear_all.len > 0);
+    // modes
+    try testing.expect(ansi.mouse_on.len > 0);
+    try testing.expect(ansi.mouse_off.len > 0);
+    try testing.expect(ansi.alt_screen_enter.len > 0);
+    try testing.expect(ansi.alt_screen_exit.len > 0);
+}
+
+// -----------------------------------------------------------------------------
+// Terminal: edge cases
+// -----------------------------------------------------------------------------
+
+test "Terminal: writeMove with zero" {
+    // writeMove(code, 0) should be a no-op (returns early)
+    // We verify it doesn't crash with edge case inputs
+    writeMove('A', 0);
+    writeMove('B', 0);
 }

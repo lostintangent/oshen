@@ -1,45 +1,75 @@
-//! Terminal I/O utilities.
+//! Terminal I/O module
 //!
-//! Provides helpers for writing to file descriptors, stdout, and stderr.
+//! Provides buffered and unbuffered I/O primitives for the shell.
+//!
+//! ## Architecture
+//!
+//! ```
+//! ┌─────────────────────────────────────────────────────────┐
+//! │                    terminal/io.zig                      │
+//! │                   (this file - index)                   │
+//! ├─────────────────────────────────────────────────────────┤
+//! │  ┌─────────┐    ┌──────────┐    ┌──────────┐           │
+//! │  │ io/     │    │ io/      │    │ io/      │           │
+//! │  │ raw.zig │    │ writer   │    │ reader   │           │
+//! │  │         │    │ .zig     │    │ .zig     │           │
+//! │  │ Direct  │    │ Stdout   │    │ Stdin    │           │
+//! │  │ syscall │───▶│ Writer   │    │ Reader   │           │
+//! │  │ wrappers│    │ (64KB)   │    │ (4KB)    │           │
+//! │  └─────────┘    └──────────┘    └──────────┘           │
+//! └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Usage
+//!
+//! ```zig
+//! const io = @import("terminal/io.zig");
+//!
+//! // Low-level (unbuffered)
+//! io.writeStdout("hello");
+//! io.writeStderr("error");
+//!
+//! // Buffered stdout
+//! var w = io.StdoutWriter{};
+//! w.write("hello");
+//! w.writeInt(42);
+//! w.flush();
+//!
+//! // Buffered stdin
+//! var r = io.StdinReader.init();
+//! var buf: [io.reader.MAX_LINE_SIZE]u8 = undefined;
+//! while (r.readLine(&buf)) |line| {
+//!     // process line
+//! }
+//! ```
 
-const std = @import("std");
+// Re-export all public APIs
+pub const raw = @import("io/raw.zig");
+pub const writer = @import("io/writer.zig");
+pub const reader = @import("io/reader.zig");
 
-/// Check if stdout is connected to a TTY
-pub fn isStdoutTty() bool {
-    return std.posix.isatty(std.posix.STDOUT_FILENO);
-}
+// Convenience re-exports for common types
+pub const StdoutWriter = writer.StdoutWriter;
+pub const StdinReader = reader.StdinReader;
 
-/// Write data to a file descriptor, ignoring errors
-pub fn writeToFd(fd: std.posix.fd_t, data: []const u8) void {
-    _ = std.posix.write(fd, data) catch {};
-}
+// Backwards compatibility alias
+pub const Writer = StdoutWriter;
 
-/// Write data to stdout, ignoring errors
-pub fn writeStdout(data: []const u8) void {
-    writeToFd(std.posix.STDOUT_FILENO, data);
-}
+// Shared constants
+pub const BUF_SIZE = 65536;
 
-/// Write data to stderr, ignoring errors
-pub fn writeStderr(data: []const u8) void {
-    writeToFd(std.posix.STDERR_FILENO, data);
-}
+// Direct re-exports from raw for backwards compatibility
+pub const writeStdout = raw.writeStdout;
+pub const writeStderr = raw.writeStderr;
+pub const writeToFd = raw.writeToFd;
+pub const printError = raw.printError;
+pub const printStdout = raw.printStdout;
+pub const isStdoutTty = raw.isStdoutTty;
 
-/// Print a formatted message to a file descriptor
-pub fn printToFd(fd: std.posix.fd_t, comptime fmt: []const u8, args: anytype) void {
-    var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch {
-        writeToFd(fd, "oshen: format error\n");
-        return;
-    };
-    writeToFd(fd, msg);
-}
+// Capture mode - redirects writeStdout to a StdoutWriter
+pub const startCapture = raw.startCapture;
+pub const endCapture = raw.endCapture;
 
-/// Print a formatted error message to stderr
-pub fn printError(comptime fmt: []const u8, args: anytype) void {
-    printToFd(std.posix.STDERR_FILENO, fmt, args);
-}
-
-/// Print a formatted message to stdout
-pub fn printStdout(comptime fmt: []const u8, args: anytype) void {
-    printToFd(std.posix.STDOUT_FILENO, fmt, args);
-}
+// Escape sequence handling
+pub const writeEscaped = raw.writeEscaped;
+pub const parseOctal = raw.parseOctal;

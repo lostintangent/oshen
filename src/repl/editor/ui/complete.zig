@@ -13,7 +13,7 @@
 
 const std = @import("std");
 
-const text_utils = @import("../../text_utils.zig");
+const repl = @import("../../repl.zig");
 const builtins = @import("../../../runtime/builtins.zig");
 
 // =============================================================================
@@ -68,7 +68,7 @@ pub const CompletionResult = struct {
 /// Returns a list of possible completions, or null if none found
 pub fn complete(allocator: std.mem.Allocator, input: []const u8, cursor: usize) !?CompletionResult {
     // Find the word being completed (from last space to cursor)
-    const word_start = text_utils.findWordStart(input, cursor);
+    const word_start = repl.findWordStart(input, cursor);
     const word = input[word_start..cursor];
     const is_first_word = isFirstWord(input, word_start);
 
@@ -136,7 +136,7 @@ fn completeFiles(allocator: std.mem.Allocator, word: []const u8, completions: *s
     // Handle tilde expansion using shared utility
     var expanded_buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = std.posix.getenv("HOME") orelse "";
-    const expanded = text_utils.expandTilde(word, home, &expanded_buf);
+    const expanded = repl.expandTilde(word, home, &expanded_buf);
     const search_word = expanded orelse word;
     const has_tilde = expanded != null;
 
@@ -225,45 +225,40 @@ fn completeCommands(allocator: std.mem.Allocator, word: []const u8, completions:
 // Tests
 // =============================================================================
 
-test "isFirstWord: at start" {
-    try std.testing.expect(isFirstWord("echo", 0));
-}
+const testing = std.testing;
 
-test "isFirstWord: second word" {
-    try std.testing.expect(!isFirstWord("echo hello", 5));
-}
-
-test "isPathLike: absolute path" {
-    try std.testing.expect(isPathLike("/usr/bin"));
-}
-
-test "isPathLike: relative path" {
-    try std.testing.expect(isPathLike("./test"));
-}
-
-test "isPathLike: tilde" {
-    try std.testing.expect(isPathLike("~/"));
-}
-
-test "isPathLike: simple word" {
-    try std.testing.expect(!isPathLike("echo"));
-}
-
-test "commonPrefix: single item" {
-    var result = CompletionResult{
-        .completions = &[_][]const u8{"hello"},
-        .word_start = 0,
-        .word_end = 0,
+test "isFirstWord: detects command position" {
+    const cases = [_]struct { []const u8, usize, bool }{
+        .{ "echo", 0, true }, // at start
+        .{ "echo hello", 5, false }, // second word
+        .{ "  echo", 2, true }, // leading whitespace
+        .{ "\tls", 1, true }, // leading tab
+        .{ "", 0, true }, // empty input
     };
-    try std.testing.expectEqualStrings("hello", result.commonPrefix());
+    for (cases) |c| try testing.expectEqual(c[2], isFirstWord(c[0], c[1]));
 }
 
-test "commonPrefix: multiple items" {
-    const items = [_][]const u8{ "hello", "help", "helicopter" };
-    var result = CompletionResult{
-        .completions = &items,
-        .word_start = 0,
-        .word_end = 0,
+test "isPathLike: detects path-like words" {
+    const cases = [_]struct { []const u8, bool }{
+        .{ "/usr/bin", true }, // absolute
+        .{ "./test", true }, // relative
+        .{ "~/", true }, // tilde
+        .{ "echo", false }, // simple word
     };
-    try std.testing.expectEqualStrings("hel", result.commonPrefix());
+    for (cases) |c| try testing.expectEqual(c[1], isPathLike(c[0]));
 }
+
+test "commonPrefix: finds longest common prefix" {
+    const Case = struct { []const []const u8, []const u8 };
+    const cases = [_]Case{
+        .{ &[_][]const u8{"hello"}, "hello" }, // single item
+        .{ &[_][]const u8{ "hello", "help", "helicopter" }, "hel" }, // shared prefix
+        .{ &[_][]const u8{}, "" }, // empty
+        .{ &[_][]const u8{ "apple", "banana", "cherry" }, "" }, // no common prefix
+    };
+    for (cases) |c| {
+        var result = CompletionResult{ .completions = c[0], .word_start = 0, .word_end = 0 };
+        try testing.expectEqualStrings(c[1], result.commonPrefix());
+    }
+}
+

@@ -1,30 +1,26 @@
 //! echo builtin - print arguments with escape sequence support
-const std = @import("std");
+
 const builtins = @import("../builtins.zig");
-const ansi = @import("../../terminal/ansi.zig");
+const args = @import("../../terminal/args.zig");
+const Writer = @import("../../terminal/io.zig").Writer;
 
-pub const builtin = builtins.Builtin{
-    .name = "echo",
-    .run = run,
-    .help = "echo [-n] [args...] - Print arguments (-n: no newline, supports \\e for ESC)",
-};
+const spec = args.Spec("echo", .{
+    .desc = "Print arguments to stdout. Supports escape sequences (\\n, \\t, \\e for ESC).",
+    .args = .{
+        .n = args.Flag(.{ .short = "n", .long = "n", .desc = "No trailing newline" }),
+        .values = args.Rest(.{ .desc = "Values to print" }),
+    },
+});
 
-fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    var args = cmd.argv[1..];
-    var newline = true;
+pub const builtin = builtins.fromSpec(spec, run);
 
-    // Check for -n flag
-    if (args.len > 0 and std.mem.eql(u8, args[0], "-n")) {
-        newline = false;
-        args = args[1..];
+fn run(_: *builtins.State, r: spec.Result) u8 {
+    var w = Writer{};
+    for (r.values, 0..) |val, i| {
+        if (i > 0) w.writeByte(' ');
+        w.writeEscaped(val);
     }
-
-    for (args, 0..) |arg, i| {
-        if (i > 0) builtins.io.writeStdout(" ");
-        ansi.writeEscaped(arg);
-    }
-
-    if (newline) builtins.io.writeStdout("\n");
-
+    if (!r.n) w.writeByte('\n');
+    w.flush();
     return 0;
 }

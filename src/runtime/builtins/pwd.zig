@@ -1,31 +1,23 @@
 const std = @import("std");
 const builtins = @import("../builtins.zig");
+const args = @import("../../terminal/args.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "pwd",
-    .help = "pwd [-t] - Print current working directory (-t: replace $HOME with ~)",
-    .run = run,
-};
+const spec = args.Spec("pwd", .{
+    .desc = "Print current working directory.",
+    .args = .{
+        .tilde = args.Flag(.{ .short = "t", .long = "tilde", .desc = "Replace $HOME with ~" }),
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    var use_tilde = false;
+pub const builtin = builtins.fromSpec(spec, run);
 
-    // argv[0] is "pwd", so skip it
-    for (cmd.argv[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--tilde")) {
-            use_tilde = true;
-        } else {
-            builtins.io.printError("pwd: unknown option: {s}\n", .{arg});
-            return 1;
-        }
-    }
-
+fn run(state: *builtins.State, r: spec.Result) u8 {
     const cwd = state.getCwd() catch |err| {
         builtins.io.printError("pwd: {}\n", .{err});
         return 1;
     };
 
-    if (use_tilde) {
+    if (r.tilde) {
         if (builtins.env.getHome()) |home| {
             if (std.mem.startsWith(u8, cwd, home)) {
                 builtins.io.writeStdout("~");

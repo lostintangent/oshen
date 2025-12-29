@@ -427,22 +427,32 @@ Oshen spawns external processes via `fork()` + `exec()`. Each pipeline runs in i
 | Pipeline (`ls \| grep`) | Fork per command, wire pipes, wait for all |
 | Background (`sleep &`) | Fork, don't wait, add to job table |
 | Builtin (`cd`, `set`) | No fork — runs in shell process |
-| Builtin with redirect (`echo > file`) | Fork to apply redirects, then run builtin |
-| Builtin in pipeline (`echo \| cat`) | Fork (required for pipe wiring) |
+| Builtin with stdout redirect (`echo > file`) | No fork — in-process with fd save/restore |
+| Builtin with complex redirects (`cmd 2>&1`) | Fork to apply redirects safely |
+| Builtin starting pipeline (`echo \| cat`) | No fork — in-process with stdout to pipe |
+| Builtin mid/end of pipeline (`cat \| echo`) | Fork (required for concurrent pipe flow) |
 | Command substitution (`$(cmd)`) | Fork, capture stdout, wait |
 
-**Builtin execution model**: Builtins run in-process for performance when possible. However, redirections and pipelines require file descriptor manipulation that shouldn't affect the parent shell, so builtins fork in those cases. Even when forked, builtins run their native implementation (not via `exec`) — this ensures they have access to shell state like the job table:
+**Builtin execution model**: Builtins run in-process for performance whenever safely possible. The shell uses in-process execution with file descriptor save/restore for simple cases, falling back to fork only when necessary:
 
 ```
 echo "hello"           →  In-process (fast path)
 cd /tmp                →  In-process (must affect parent)
 set x y                →  In-process (must affect parent state)
-echo "hello" > file    →  Fork, run builtin, exit (redirect needs isolated fd table)
-echo "hello" | cat     →  Fork, run builtin, exit (pipe needs connected fd)
+echo "hello" > file    →  In-process: save stdout, open file, run, restore
+echo "hello" >> file   →  In-process: same as above with append mode
+echo "hello" | cat     →  In-process: save stdout, dup2 to pipe, run, restore
+cat file | echo "x"    →  Fork for echo (mid-pipeline needs concurrent flow)
+echo 2>&1 > file       →  Fork (complex redirects need isolated fd table)
 jobs | grep sleep      →  Fork, run builtin with shell state access, exit
 ```
 
-This ensures common cases like `cd`, `set`, and simple `echo` remain fast, while redirects and pipelines work correctly.
+**Why some cases still fork:**
+- **Complex redirects** (stderr, fd duplication): Safely isolating multiple fd changes is error-prone in-process
+- **Builtins mid/end of pipeline**: Pipes have limited buffer (~64KB). If we run a mid-pipeline builtin in-process, we block the parent while previous stages might fill the pipe buffer and deadlock. Forking allows concurrent execution.
+- **Process group leadership**: The first forked process becomes the process group leader for job control
+
+This design optimizes the common cases (`echo > file`, `echo | grep`) while maintaining correctness for complex scenarios.
 
 ### In-Process Builtin Capture
 

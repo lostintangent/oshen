@@ -2,8 +2,7 @@
 //!
 //! Provides color codes, styles, and escape sequence handling for terminal output.
 
-const std = @import("std");
-const io = @import("io.zig");
+const raw = @import("io/raw.zig");
 
 // =============================================================================
 // Escape Sequence Prefixes
@@ -109,52 +108,7 @@ pub fn displayLength(s: []const u8) usize {
     return len;
 }
 
-/// Write a string to stdout, interpreting \e and octal escape sequences
-pub fn writeEscaped(s: []const u8) void {
-    var i: usize = 0;
-    while (i < s.len) {
-        if (s[i] == '\\' and i + 1 < s.len) {
-            switch (s[i + 1]) {
-                'e' => {
-                    io.writeStdout("\x1b");
-                    i += 2;
-                },
-                '0' => {
-                    // Octal escape: \0, \033, etc.
-                    const octal = parseOctal(s[i + 1 ..]);
-                    if (octal.len > 0) {
-                        io.writeStdout(&[1]u8{octal.value});
-                        i += 1 + octal.len;
-                    } else {
-                        io.writeStdout("\\");
-                        i += 1;
-                    }
-                },
-                else => {
-                    io.writeStdout(&[1]u8{s[i]});
-                    i += 1;
-                },
-            }
-        } else {
-            io.writeStdout(&[1]u8{s[i]});
-            i += 1;
-        }
-    }
-}
-
-/// Parse an octal escape sequence, returns the value and number of chars consumed
-fn parseOctal(s: []const u8) struct { value: u8, len: usize } {
-    var value: u8 = 0;
-    var len: usize = 0;
-
-    for (s[0..@min(s.len, 3)]) |c| {
-        if (c >= '0' and c <= '7') {
-            value = value *| 8 +| (c - '0');
-            len += 1;
-        } else {
-            break;
-        }
-    }
-
-    return .{ .value = value, .len = len };
-}
+/// Write a string to stdout, interpreting escape sequences.
+/// Delegates to raw.writeEscaped for the shared implementation.
+/// Note: For performance-critical code, prefer Writer.writeEscaped() which buffers output.
+pub const writeEscaped = raw.writeEscaped;

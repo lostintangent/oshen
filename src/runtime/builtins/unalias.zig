@@ -1,24 +1,19 @@
 //! unalias builtin - remove command aliases
 const builtins = @import("../builtins.zig");
+const args = @import("../../terminal/args.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "unalias",
-    .run = run,
-    .help = "unalias name... - Remove aliases",
-};
+const spec = args.Spec("unalias", .{
+    .desc = "Remove command aliases.",
+    .args = .{
+        .names = args.Rest(.{ .desc = "Alias names to remove", .required = true }),
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    const argv = cmd.argv;
+pub const builtin = builtins.fromSpec(spec, run);
 
-    if (argv.len < 2) {
-        builtins.io.printError("unalias: usage: unalias name...\n", .{});
-        return 1;
-    }
-
-    // Unset each named alias (silently ignore missing, like unset)
-    for (argv[1..]) |name| {
+fn run(state: *builtins.State, r: spec.Result) u8 {
+    for (r.names) |name| {
         state.unsetAlias(name);
     }
-
     return 0;
 }

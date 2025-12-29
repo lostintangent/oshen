@@ -1,23 +1,26 @@
 //! alias builtin - define command aliases
-//!
-//! Supports:
-//!   alias             - List all aliases
-//!   alias NAME        - Show specific alias
-//!   alias NAME WORDS  - Define alias (words joined with spaces)
 
 const builtins = @import("../builtins.zig");
+const args = @import("../../terminal/args.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "alias",
-    .run = run,
-    .help = "alias [NAME [EXPANSION...]] - Define or list aliases",
-};
+const spec = args.Spec("alias", .{
+    .desc = "Define or list command aliases.",
+    .args = .{
+        .name = args.StringPositional(.{ .desc = "Alias name", .default = "" }),
+        .expansion = args.Rest(.{ .desc = "Command expansion" }),
+    },
+    .examples = &.{
+        "alias              # List all aliases",
+        "alias ll           # Show 'll' alias",
+        "alias ll ls -la    # Define 'll' as 'ls -la'",
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    const argv = cmd.argv;
+pub const builtin = builtins.fromSpec(spec, run);
 
-    // alias with no args: list all aliases
-    if (argv.len == 1) {
+fn run(state: *builtins.State, r: spec.Result) u8 {
+    // No args: list all aliases
+    if (r.name.len == 0) {
         var iter = state.aliases.iterator();
         while (iter.next()) |entry| {
             builtins.io.printStdout("alias {s} '{s}'\n", .{ entry.key_ptr.*, entry.value_ptr.* });
@@ -25,24 +28,23 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
         return 0;
     }
 
-    // alias NAME: show single alias
-    if (argv.len == 2) {
-        if (state.getAlias(argv[1])) |expansion| {
-            builtins.io.printStdout("alias {s} '{s}'\n", .{ argv[1], expansion });
+    // Name only: show single alias
+    if (r.expansion.len == 0) {
+        if (state.getAlias(r.name)) |expansion| {
+            builtins.io.printStdout("alias {s} '{s}'\n", .{ r.name, expansion });
             return 0;
         }
-        builtins.io.printError("alias: {s}: not found\n", .{argv[1]});
+        builtins.io.printError("alias: {s}: not found\n", .{r.name});
         return 1;
     }
 
-    // alias NAME EXPANSION...: define alias
-    const name = argv[1];
-    const expansion = builtins.joinArgs(state.allocator, argv[2..]) catch {
+    // Name + expansion: define alias
+    const expansion = builtins.joinArgs(state.allocator, r.expansion) catch {
         return builtins.reportOOM("alias");
     };
     defer state.allocator.free(expansion);
 
-    state.setAlias(name, expansion) catch {
+    state.setAlias(r.name, expansion) catch {
         return builtins.reportOOM("alias");
     };
 

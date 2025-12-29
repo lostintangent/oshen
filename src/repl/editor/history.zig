@@ -100,19 +100,34 @@ pub const History = struct {
     }
 
     /// Add a command to history. Increments frequency if command+cwd already exists.
-    /// O(1) for most adds; O(n log n) when pruning is triggered (every ~2K unique entries).
+    /// O(1) for new entries; O(n) for duplicates (moved to end for recency).
+    /// O(n log n) when pruning is triggered (every ~2K unique entries).
     pub fn add(self: *History, input: AddInput) bool {
         if (input.command.len == 0) return false;
 
         const key = hash(input.command, input.cwd);
         const now = std.time.timestamp();
 
-        // Update existing entry if found (O(1) hash lookup)
-        if (self.dedup.get(key)) |index| {
-            const entry = &self.entries.items[index];
-            entry.frequency += 1;
-            entry.timestamp = now;
-            entry.exit_status = input.exit_status;
+        // Update existing entry if found - move to end for proper recency navigation
+        if (self.dedup.get(key)) |old_index| {
+            const old_entry = self.entries.orderedRemove(old_index);
+
+            // Append updated entry at end
+            self.entries.appendAssumeCapacity(.{
+                .command = old_entry.command,
+                .cwd = old_entry.cwd,
+                .timestamp = now,
+                .exit_status = input.exit_status,
+                .frequency = old_entry.frequency + 1,
+            });
+
+            // Fix dedup indices: entries after old_index shifted down by 1
+            var it = self.dedup.valueIterator();
+            while (it.next()) |idx_ptr| {
+                if (idx_ptr.* > old_index) idx_ptr.* -= 1;
+            }
+            self.dedup.putAssumeCapacity(key, self.entries.items.len - 1);
+
             return true;
         }
 
@@ -392,78 +407,142 @@ pub fn successScore(exit_status: u8) f64 {
 
 const testing = std.testing;
 
-test "add: stores command with metadata" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
+const TestContext = struct {
+    hist: History,
 
-    try testing.expect(hist.add(.{ .command = "echo hello", .cwd = "/home", .exit_status = 0 }));
-    try testing.expect(hist.add(.{ .command = "ls -la", .cwd = "/home", .exit_status = 0 }));
+    fn init() TestContext {
+        return .{ .hist = History.init(testing.allocator) };
+    }
 
-    try testing.expectEqual(@as(usize, 2), hist.count());
-    try testing.expectEqualStrings("echo hello", hist.get(0).?.command);
-    try testing.expectEqualStrings("/home", hist.get(0).?.cwd);
+    fn deinit(self: *TestContext) void {
+        self.hist.deinit();
+    }
+
+    fn add(self: *TestContext, cmd: []const u8, cwd: []const u8, status: u8) bool {
+        return self.hist.add(.{ .command = cmd, .cwd = cwd, .exit_status = status });
+    }
+};
+
+// -----------------------------------------------------------------------------
+// Adding Entries
+// -----------------------------------------------------------------------------
+
+test "History: adding entries" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    // Stores command with metadata
+    try testing.expect(ctx.add("echo hello", "/home", 0));
+    try testing.expect(ctx.add("ls -la", "/home", 0));
+    try testing.expectEqual(@as(usize, 2), ctx.hist.count());
+    try testing.expectEqualStrings("echo hello", ctx.hist.get(0).?.command);
+    try testing.expectEqualStrings("/home", ctx.hist.get(0).?.cwd);
+
+    // Ignores empty commands
+    try testing.expect(!ctx.add("", "/home", 0));
 }
 
-test "add: ignores empty commands" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
+test "History: deduplication moves entry to end" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expect(!hist.add(.{ .command = "", .cwd = "/home", .exit_status = 0 }));
-    try testing.expectEqual(@as(usize, 0), hist.count());
+    // Duplicate command+cwd increments frequency and moves to end
+    _ = ctx.add("git status", "/project", 0);
+    _ = ctx.add("other cmd", "/project", 0);
+    _ = ctx.add("git status", "/project", 0); // should move to end
+    try testing.expectEqual(@as(usize, 2), ctx.hist.count());
+    try testing.expectEqual(@as(u32, 2), ctx.hist.get(1).?.frequency); // now at index 1
+    try testing.expectEqualStrings("git status", ctx.hist.get(1).?.command);
+    try testing.expectEqualStrings("other cmd", ctx.hist.get(0).?.command);
+
+    // Same command in different cwd creates separate entries
+    _ = ctx.add("make", "/project-a", 0);
+    _ = ctx.add("make", "/project-b", 0);
+    try testing.expectEqual(@as(usize, 4), ctx.hist.count());
 }
 
-test "dedup: increments frequency on duplicate command+cwd" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
+test "History: duplicate updates exit status" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    _ = hist.add(.{ .command = "git status", .cwd = "/project", .exit_status = 0 });
-    _ = hist.add(.{ .command = "git status", .cwd = "/project", .exit_status = 0 });
-    _ = hist.add(.{ .command = "git status", .cwd = "/project", .exit_status = 0 });
+    // Add command with failure status
+    _ = ctx.add("make build", "/project", 1);
+    try testing.expectEqual(@as(u8, 1), ctx.hist.get(0).?.exit_status);
 
-    try testing.expectEqual(@as(usize, 1), hist.count());
-    try testing.expectEqual(@as(u32, 3), hist.get(0).?.frequency);
+    // Re-run same command with success - should update exit status (entry moves to end)
+    _ = ctx.add("make build", "/project", 0);
+    try testing.expectEqual(@as(usize, 1), ctx.hist.count()); // still one entry
+    try testing.expectEqual(@as(u8, 0), ctx.hist.get(0).?.exit_status); // updated
 }
 
-test "dedup: same command in different cwd creates separate entries" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
+test "History: repeated command always appears at end for up-arrow" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    _ = hist.add(.{ .command = "make", .cwd = "/project-a", .exit_status = 0 });
-    _ = hist.add(.{ .command = "make", .cwd = "/project-b", .exit_status = 0 });
+    // Simulate: run clear, then other commands, then clear again
+    _ = ctx.add("clear", "/home", 0);
+    _ = ctx.add("ls", "/home", 0);
+    _ = ctx.add("git status", "/home", 0);
+    _ = ctx.add("clear", "/home", 0); // should move to end
 
-    try testing.expectEqual(@as(usize, 2), hist.count());
+    // INVARIANT: Editor.historyPrev walks entries backward from the end.
+    // So entries[len-1] is shown on first up-arrow, entries[len-2] on second, etc.
+    // This test ensures duplicate commands are moved to the end, so up-arrow
+    // shows them immediately after re-running (not buried at their original index).
+    try testing.expectEqual(@as(usize, 3), ctx.hist.count());
+    try testing.expectEqualStrings("clear", ctx.hist.get(2).?.command); // 1st up-arrow
+    try testing.expectEqualStrings("git status", ctx.hist.get(1).?.command); // 2nd up-arrow
+    try testing.expectEqualStrings("ls", ctx.hist.get(0).?.command); // 3rd up-arrow
 }
 
-test "scoring: recent beats old at same frequency" {
+// -----------------------------------------------------------------------------
+// Scoring
+// -----------------------------------------------------------------------------
+
+test "Scoring: recency score decays over time" {
+    const now: i64 = 1000000;
+
+    // Just now = ~100
+    try testing.expect(recencyScore(now, now) > 99.0);
+
+    // One week ago = ~50 (half-life)
+    const week_ago = now - 7 * 24 * 60 * 60;
+    const week_score = recencyScore(week_ago, now);
+    try testing.expect(week_score > 45.0 and week_score < 55.0);
+
+    // Two weeks ago = ~25
+    const two_weeks_ago = now - 14 * 24 * 60 * 60;
+    const two_week_score = recencyScore(two_weeks_ago, now);
+    try testing.expect(two_week_score > 20.0 and two_week_score < 30.0);
+}
+
+test "Scoring: recency and frequency" {
     const now = std.time.timestamp();
     const week_ago = now - 7 * 24 * 60 * 60;
 
+    // Recent beats old at same frequency
     const recent: Entry = .{ .command = "a", .cwd = "/", .timestamp = now, .exit_status = 0, .frequency = 1 };
     const old: Entry = .{ .command = "b", .cwd = "/", .timestamp = week_ago, .exit_status = 0, .frequency = 1 };
-
-    // Pass null for cwd to test eviction-style scoring
     try testing.expect(scoreEntry(&recent, null, now) > scoreEntry(&old, null, now));
-}
 
-test "scoring: high frequency compensates for age" {
-    const now = std.time.timestamp();
-    const week_ago = now - 7 * 24 * 60 * 60;
-
+    // High frequency compensates for age
     const old_frequent: Entry = .{ .command = "a", .cwd = "/", .timestamp = week_ago, .exit_status = 0, .frequency = 100 };
     const old_rare: Entry = .{ .command = "b", .cwd = "/", .timestamp = week_ago, .exit_status = 0, .frequency = 1 };
-
     try testing.expect(scoreEntry(&old_frequent, null, now) > scoreEntry(&old_rare, null, now));
 }
 
-test "scoring: directory relevance" {
-    try testing.expectEqual(@as(f64, 100.0), directoryScore("/home/user", "/home/user"));
-    try testing.expectEqual(@as(f64, 50.0), directoryScore("/home", "/home/user/project"));
-    try testing.expectEqual(@as(f64, 30.0), directoryScore("/home/user/project", "/home/user"));
-    try testing.expectEqual(@as(f64, 20.0), directoryScore("/projects/app-a", "/projects/app-b"));
-    try testing.expectEqual(@as(f64, 0.0), directoryScore("/var/log", "/home/user"));
+test "Scoring: directory relevance" {
+    const cases = [_]struct { []const u8, []const u8, f64 }{
+        .{ "/home/user", "/home/user", 100.0 }, // exact match
+        .{ "/home", "/home/user/project", 50.0 }, // ancestor
+        .{ "/home/user/project", "/home/user", 30.0 }, // child
+        .{ "/projects/app-a", "/projects/app-b", 20.0 }, // sibling
+        .{ "/var/log", "/home/user", 0.0 }, // unrelated
+    };
+    for (cases) |c| try testing.expectEqual(c[2], directoryScore(c[0], c[1]));
 }
 
-test "scoring: sibling directory detection" {
+test "Scoring: sibling directory detection" {
     try testing.expect(areSiblingDirectories("/projects/a", "/projects/b"));
     try testing.expect(areSiblingDirectories("/home/user/proj1", "/home/user/proj2"));
     try testing.expect(!areSiblingDirectories("/projects/a", "/other/b"));
@@ -471,31 +550,37 @@ test "scoring: sibling directory detection" {
     try testing.expect(!areSiblingDirectories("/a", "/b")); // both under root, but root is special
 }
 
-test "scoring: parent directory extraction" {
-    try testing.expectEqualStrings("/home/user", parentDirectory("/home/user/projects"));
-    try testing.expectEqualStrings("/", parentDirectory("/home"));
-    try testing.expectEqualStrings("", parentDirectory("/"));
-    try testing.expectEqualStrings("/a/b", parentDirectory("/a/b/c/"));
-}
+test "Scoring: helper functions" {
+    // Parent directory extraction
+    const parent_cases = [_]struct { []const u8, []const u8 }{
+        .{ "/home/user/projects", "/home/user" },
+        .{ "/home", "/" },
+        .{ "/", "" },
+        .{ "/a/b/c/", "/a/b" },
+    };
+    for (parent_cases) |c| try testing.expectEqualStrings(c[1], parentDirectory(c[0]));
 
-test "scoring: frequency scoring" {
+    // Frequency scoring
     try testing.expectEqual(@as(f64, 0.0), frequencyScore(0));
     try testing.expectEqual(@as(f64, 20.0), frequencyScore(1));
     try testing.expectEqual(@as(f64, 40.0), frequencyScore(3));
-}
 
-test "scoring: success scoring" {
+    // Success scoring
     try testing.expectEqual(@as(f64, 100.0), successScore(0));
     try testing.expectEqual(@as(f64, 20.0), successScore(1));
     try testing.expectEqual(@as(f64, 20.0), successScore(127));
 }
 
-test "persistence: save and load preserves entries" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
+// -----------------------------------------------------------------------------
+// Persistence
+// -----------------------------------------------------------------------------
 
-    _ = hist.add(.{ .command = "echo test", .cwd = "/tmp", .exit_status = 0 });
-    _ = hist.add(.{ .command = "ls", .cwd = "/home", .exit_status = 1 });
+test "History: save and load preserves entries" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    _ = ctx.add("echo test", "/tmp", 0);
+    _ = ctx.add("ls", "/home", 1);
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -504,14 +589,14 @@ test "persistence: save and load preserves entries" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath("history", &buf);
 
-    hist.save(path);
+    ctx.hist.save(path);
 
-    var hist2 = History.init(testing.allocator);
-    defer hist2.deinit();
-    hist2.load(path);
+    var ctx2 = TestContext.init();
+    defer ctx2.deinit();
+    ctx2.hist.load(path);
 
-    try testing.expectEqual(@as(usize, 2), hist2.count());
-    try testing.expectEqualStrings("echo test", hist2.get(0).?.command);
-    try testing.expectEqualStrings("/tmp", hist2.get(0).?.cwd);
-    try testing.expectEqual(@as(u8, 1), hist2.get(1).?.exit_status);
+    try testing.expectEqual(@as(usize, 2), ctx2.hist.count());
+    try testing.expectEqualStrings("echo test", ctx2.hist.get(0).?.command);
+    try testing.expectEqualStrings("/tmp", ctx2.hist.get(0).?.cwd);
+    try testing.expectEqual(@as(u8, 1), ctx2.hist.get(1).?.exit_status);
 }

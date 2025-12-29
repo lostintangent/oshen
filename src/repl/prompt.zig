@@ -8,7 +8,7 @@
 
 const std = @import("std");
 
-const text_utils = @import("text_utils.zig");
+const repl = @import("repl.zig");
 const interpreter = @import("../interpreter/interpreter.zig");
 const State = @import("../runtime/state.zig").State;
 const ansi = @import("../terminal/ansi.zig");
@@ -58,7 +58,7 @@ fn buildDefault(allocator: std.mem.Allocator, state: *State, buf: []u8) []const 
 
     // Contract home directory to ~ using shared utility
     const display_path = if (state.home) |home|
-        text_utils.contractTilde(cwd, home, buf[0..PATH_SEGMENT_END])
+        repl.contractTilde(cwd, home, buf[0..PATH_SEGMENT_END])
     else
         cwd;
 
@@ -99,7 +99,7 @@ fn getGitBranch(allocator: std.mem.Allocator, state: *State) ?[]const u8 {
 
 const testing = std.testing;
 
-test "prompt: buildDefault returns valid prompt" {
+test "Prompt: default format ends with suffix" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
@@ -107,50 +107,34 @@ test "prompt: buildDefault returns valid prompt" {
     defer state.deinit();
 
     var buf: [4096]u8 = undefined;
-    const prompt_str = buildDefault(arena.allocator(), &state, &buf);
-
-    // Should end with "# " suffix
-    try testing.expect(std.mem.endsWith(u8, prompt_str, "# "));
-    // Should contain something (at least the suffix)
-    try testing.expect(prompt_str.len >= 2);
+    try testing.expect(std.mem.endsWith(u8, buildDefault(arena.allocator(), &state, &buf), "# "));
 }
 
-test "prompt: tilde substitution in path" {
+test "Prompt: tilde substitution in path" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     defer state.deinit();
 
-    // Set home to a known value
     state.home = "/home/testuser";
-
     var buf: [4096]u8 = undefined;
-    const prompt_str = buildDefault(arena.allocator(), &state, &buf);
-
-    // Prompt should be generated (may or may not contain ~ depending on cwd)
-    try testing.expect(prompt_str.len > 0);
-    try testing.expect(std.mem.endsWith(u8, prompt_str, "# "));
+    try testing.expect(std.mem.endsWith(u8, buildDefault(arena.allocator(), &state, &buf), "# "));
 }
 
-test "prompt: build uses custom prompt function if defined" {
+test "Prompt: custom function overrides default" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     defer state.deinit();
 
-    // Define a custom prompt function
     try state.setFunction("prompt", "echo 'custom> '");
-
     var buf: [4096]u8 = undefined;
-    const prompt_str = build(arena.allocator(), &state, &buf);
-
-    // Should contain output from custom function
-    try testing.expectEqualStrings("custom> \n", prompt_str);
+    try testing.expectEqualStrings("custom> ", build(arena.allocator(), &state, &buf));
 }
 
-test "prompt: build falls back to default without prompt function" {
+test "Prompt: fallback to default without function" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
@@ -158,8 +142,5 @@ test "prompt: build falls back to default without prompt function" {
     defer state.deinit();
 
     var buf: [4096]u8 = undefined;
-    const prompt_str = build(arena.allocator(), &state, &buf);
-
-    // Should get default prompt (ends with "# ")
-    try testing.expect(std.mem.endsWith(u8, prompt_str, "# "));
+    try testing.expect(std.mem.endsWith(u8, build(arena.allocator(), &state, &buf), "# "));
 }

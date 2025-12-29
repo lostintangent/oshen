@@ -411,76 +411,91 @@ pub const Lexer = struct {
 
 const testing = std.testing;
 
-/// Asserts that a token has the expected kind.
-fn expectTokenKind(tok: Token, expected: std.meta.Tag(token_types.TokenKind)) !void {
-    try testing.expectEqual(expected, std.meta.activeTag(tok.kind));
-}
+const TestContext = struct {
+    arena: std.heap.ArenaAllocator,
 
-/// Asserts that a word token has a single bare segment with the expected text.
-fn expectBareWord(segs: []const WordPart, expected: []const u8) !void {
-    if (segs.len == 1 and segs[0].quotes == .none) {
-        try testing.expectEqualStrings(expected, segs[0].text);
-        return;
+    fn init() TestContext {
+        return .{ .arena = std.heap.ArenaAllocator.init(testing.allocator) };
     }
-    return error.TestExpectedEqual;
-}
 
-/// Tokenizes input and returns tokens (using arena allocator for cleanup).
-fn tokenizeTest(arena: *std.heap.ArenaAllocator, input: []const u8) ![]Token {
-    var lex = Lexer.init(arena.allocator(), input);
-    return try lex.tokenize();
-}
+    fn deinit(self: *TestContext) void {
+        self.arena.deinit();
+    }
+
+    fn tokenize(self: *TestContext, input: []const u8) ![]Token {
+        var lex = Lexer.init(self.arena.allocator(), input);
+        return try lex.tokenize();
+    }
+
+    fn expectError(self: *TestContext, input: []const u8, expected: LexError) !void {
+        var lex = Lexer.init(self.arena.allocator(), input);
+        try testing.expectError(expected, lex.tokenize());
+    }
+
+    /// Asserts that a word token has a single bare segment with the expected text.
+    fn expectBareWord(segs: []const WordPart, expected: []const u8) !void {
+        if (segs.len == 1 and segs[0].quotes == .none) {
+            try testing.expectEqualStrings(expected, segs[0].text);
+            return;
+        }
+        return error.TestExpectedEqual;
+    }
+};
+
+// -----------------------------------------------------------------------------
+// Words and Quoting
+// -----------------------------------------------------------------------------
 
 test "Words: simple bare words" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const tokens = try tokenizeTest(&arena, "echo hello world");
+    const tokens = try ctx.tokenize("echo hello world");
 
     try testing.expectEqual(@as(usize, 3), tokens.len);
-    try expectTokenKind(tokens[0], .word);
-    try expectTokenKind(tokens[1], .word);
-    try expectTokenKind(tokens[2], .word);
-    try expectBareWord(tokens[0].kind.word, "echo");
-    try expectBareWord(tokens[1].kind.word, "hello");
-    try expectBareWord(tokens[2].kind.word, "world");
+    try TestContext.expectBareWord(tokens[0].kind.word, "echo");
+    try TestContext.expectBareWord(tokens[1].kind.word, "hello");
+    try TestContext.expectBareWord(tokens[2].kind.word, "world");
 }
 
-test "Words: single quoted string" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Words: quoted strings preserve spaces" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const tokens = try tokenizeTest(&arena, "echo 'hello world'");
+    // Test both quote styles in one test
+    const single = try ctx.tokenize("echo 'hello world'");
+    try testing.expectEqual(@as(usize, 2), single.len);
+    try testing.expectEqual(QuoteKind.single, single[1].kind.word[0].quotes);
+    try testing.expectEqualStrings("hello world", single[1].kind.word[0].text);
 
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    const segs = tokens[1].kind.word;
-    try testing.expectEqual(@as(usize, 1), segs.len);
-    try testing.expectEqual(QuoteKind.single, segs[0].quotes);
-    try testing.expectEqualStrings("hello world", segs[0].text);
+    const double = try ctx.tokenize("echo \"hello world\"");
+    try testing.expectEqual(@as(usize, 2), double.len);
+    try testing.expectEqual(QuoteKind.double, double[1].kind.word[0].quotes);
+    try testing.expectEqualStrings("hello world", double[1].kind.word[0].text);
+
+    // Empty quoted strings
+    const emptySingle = try ctx.tokenize("echo ''");
+    try testing.expectEqual(@as(usize, 2), emptySingle.len);
+    try testing.expectEqual(QuoteKind.single, emptySingle[1].kind.word[0].quotes);
+    try testing.expectEqualStrings("", emptySingle[1].kind.word[0].text);
+
+    const emptyDouble = try ctx.tokenize("echo \"\"");
+    try testing.expectEqual(@as(usize, 2), emptyDouble.len);
+    try testing.expectEqual(QuoteKind.double, emptyDouble[1].kind.word[0].quotes);
+    try testing.expectEqualStrings("", emptyDouble[1].kind.word[0].text);
 }
 
-test "Words: double quoted string" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Words: mixed quote segments combine into single token" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const tokens = try tokenizeTest(&arena, "echo \"hello world\"");
-
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    const segs = tokens[1].kind.word;
-    try testing.expectEqual(@as(usize, 1), segs.len);
-    try testing.expectEqual(QuoteKind.double, segs[0].quotes);
-    try testing.expectEqualStrings("hello world", segs[0].text);
-}
-
-test "Words: mixed quote segments" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "echo hello\"world\"'!'");
+    const tokens = try ctx.tokenize("echo hello\"world\"'!'");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
     const segs = tokens[1].kind.word;
     try testing.expectEqual(@as(usize, 3), segs.len);
+
+    // Each segment preserves its quote context
     try testing.expectEqual(QuoteKind.none, segs[0].quotes);
     try testing.expectEqualStrings("hello", segs[0].text);
     try testing.expectEqual(QuoteKind.double, segs[1].quotes);
@@ -489,285 +504,211 @@ test "Words: mixed quote segments" {
     try testing.expectEqualStrings("!", segs[2].text);
 }
 
-test "Escapes: sequences in double quotes" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Escape Sequences
+// -----------------------------------------------------------------------------
 
-    const tokens = try tokenizeTest(&arena, "echo \"hello\\nworld\\t!\"");
+test "Escapes: double quotes process escape sequences" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    const segs = tokens[1].kind.word;
-    try testing.expectEqual(@as(usize, 1), segs.len);
-    try testing.expectEqualStrings("hello\nworld\t!", segs[0].text);
+    // Standard escapes: \n, \t
+    const tokens = try ctx.tokenize("echo \"hello\\nworld\\t!\"");
+    try testing.expectEqualStrings("hello\nworld\t!", tokens[1].kind.word[0].text);
+
+    // Escaped quotes and backslashes
+    const quoted = try ctx.tokenize("echo \"say \\\"hi\\\"\"");
+    try testing.expectEqualStrings("say \"hi\"", quoted[1].kind.word[0].text);
+
+    const backslash = try ctx.tokenize("echo \"a\\\\b\"");
+    try testing.expectEqualStrings("a\\b", backslash[1].kind.word[0].text);
+
+    // Escaped $ preserved for expander
+    const dollar = try ctx.tokenize("echo \"\\$literal\"");
+    try testing.expectEqualStrings("\\$literal", dollar[1].kind.word[0].text);
+
+    // Unknown escapes preserved as-is
+    const unknown = try ctx.tokenize("echo \"\\x\"");
+    try testing.expectEqualStrings("\\x", unknown[1].kind.word[0].text);
 }
 
-test "Escapes: quote in double quotes" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Escapes: bare words preserve backslash for expander" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const tokens = try tokenizeTest(&arena, "echo \"say \\\"hi\\\"\"");
-
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    const segs = tokens[1].kind.word;
-    try testing.expectEqualStrings("say \"hi\"", segs[0].text);
-}
-
-test "Escapes: dollar in bare word" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "echo \\$HOME");
-
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    // The lexer preserves \$ for the expander to handle
+    // \$ preserved for expander
+    const tokens = try ctx.tokenize("echo \\$HOME");
     try testing.expectEqualStrings("\\$HOME", tokens[1].kind.word[0].text);
+
+    // Other escapes: just the escaped char (backslash consumed)
+    const space = try ctx.tokenize("echo hello\\ world");
+    try testing.expectEqual(@as(usize, 2), space.len);
+    try testing.expectEqualStrings("hello world", space[1].kind.word[0].text);
 }
 
-test "Command substitution: basic" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Command Substitution
+// -----------------------------------------------------------------------------
 
-    const tokens = try tokenizeTest(&arena, "echo $(whoami)");
+test "Command substitution: $() and bare () forms" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    try expectBareWord(tokens[1].kind.word, "$(whoami)");
+    // $() syntax
+    const dollar = try ctx.tokenize("echo $(whoami)");
+    try testing.expectEqual(@as(usize, 2), dollar.len);
+    try TestContext.expectBareWord(dollar[1].kind.word, "$(whoami)");
+
+    // Bare () gets normalized to $()
+    const bare = try ctx.tokenize("echo (whoami)");
+    try testing.expectEqual(@as(usize, 2), bare.len);
+    try TestContext.expectBareWord(bare[1].kind.word, "$(whoami)");
 }
 
-test "Command substitution: nested" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Command substitution: nested and with pipes" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const tokens = try tokenizeTest(&arena, "echo $(dirname $(pwd))");
+    // Nested substitution
+    const nested = try ctx.tokenize("echo $(dirname $(pwd))");
+    try TestContext.expectBareWord(nested[1].kind.word, "$(dirname $(pwd))");
 
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    try expectBareWord(tokens[1].kind.word, "$(dirname $(pwd))");
+    // Bare parens nested
+    const bareNested = try ctx.tokenize("echo (dirname (pwd))");
+    try TestContext.expectBareWord(bareNested[1].kind.word, "$(dirname (pwd))");
+
+    // Pipe inside parens stays inside
+    const withPipe = try ctx.tokenize("echo (ls | head)");
+    try TestContext.expectBareWord(withPipe[1].kind.word, "$(ls | head)");
 }
 
-test "Bare paren command substitution: basic" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Command substitution: concatenation with text" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const tokens = try tokenizeTest(&arena, "echo (whoami)");
-
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    // Bare parens get normalized to $(...)
-    try expectBareWord(tokens[1].kind.word, "$(whoami)");
-}
-
-test "Bare paren command substitution: nested" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "echo (dirname (pwd))");
-
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    try expectBareWord(tokens[1].kind.word, "$(dirname (pwd))");
-}
-
-test "Bare paren command substitution: with pipe" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "echo (ls | head)");
-
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    // Pipe should be captured inside the parens, not as separate operator
-    try expectBareWord(tokens[1].kind.word, "$(ls | head)");
-}
-
-test "Bare paren command substitution: concatenation" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "file_(date).txt");
-
+    const tokens = try ctx.tokenize("file_(date).txt");
     try testing.expectEqual(@as(usize, 1), tokens.len);
-    try expectBareWord(tokens[0].kind.word, "file_$(date).txt");
+    try TestContext.expectBareWord(tokens[0].kind.word, "file_$(date).txt");
 }
 
-test "Operators: pipe" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Operators (table-driven)
+// -----------------------------------------------------------------------------
 
-    const tokens = try tokenizeTest(&arena, "cat file | grep foo");
+test "Operators: all types tokenize correctly" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 5), tokens.len);
-    try expectTokenKind(tokens[2], .operator);
-    try testing.expectEqual(Operator.pipe, tokens[2].kind.operator);
+    // Each input is "a <op> b" or "a <op>", operator is always token[1]
+    const cases = [_]struct { []const u8, Operator }{
+        // Pipes
+        .{ "a | b", .pipe },
+        .{ "a |> b", .pipe_arrow },
+        // Logical
+        .{ "a && b", .@"and" },
+        .{ "a || b", .@"or" },
+        // Background
+        .{ "a &", .background },
+        // Capture
+        .{ "a => b", .capture },
+        .{ "a =>@ b", .capture_lines },
+        // Redirects
+        .{ "a < b", .redirect_stdin },
+        .{ "a > b", .redirect_stdout },
+        .{ "a >> b", .redirect_stdout_append },
+        .{ "a 2> b", .redirect_stderr },
+        .{ "a 2>> b", .redirect_stderr_append },
+        .{ "a &> b", .redirect_both },
+        .{ "a 2>&1", .redirect_stderr_to_stdout },
+    };
+
+    for (cases) |case| {
+        const tokens = try ctx.tokenize(case[0]);
+        try testing.expectEqual(case[1], tokens[1].kind.operator);
+    }
 }
 
-test "Operators: pipe arrow" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Operators: text 'and'/'or' tokenize as words" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const tokens = try tokenizeTest(&arena, "cat file |> grep foo");
-
-    try testing.expectEqual(@as(usize, 5), tokens.len);
-    try expectTokenKind(tokens[2], .operator);
-    try testing.expectEqual(Operator.pipe_arrow, tokens[2].kind.operator);
+    // Text operators are lexed as words; parser handles them contextually
+    const tokens = try ctx.tokenize("true and echo ok or echo fail");
+    try TestContext.expectBareWord(tokens[1].kind.word, "and");
+    try TestContext.expectBareWord(tokens[4].kind.word, "or");
 }
 
-test "Operators: logical" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+test "Operators: work adjacent to words without whitespace" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const tokens = try tokenizeTest(&arena, "true && echo ok || echo fail");
-
-    try testing.expectEqual(Operator.@"and", tokens[1].kind.operator);
-    try testing.expectEqual(Operator.@"or", tokens[4].kind.operator);
-}
-
-test "Operators: text logical as words" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "true and echo ok or echo fail");
-
-    // Text operators are now lexed as words, not ops
-    // The parser checks for them contextually
-    try expectTokenKind(tokens[1], .word);
-    try expectTokenKind(tokens[4], .word);
-    try testing.expectEqualStrings("and", tokens[1].kind.word[0].text);
-    try testing.expectEqualStrings("or", tokens[4].kind.word[0].text);
-}
-
-test "Operators: background" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "sleep 1 & echo done");
-
-    try testing.expectEqual(@as(usize, 5), tokens.len);
-    try expectTokenKind(tokens[2], .operator);
-    try testing.expectEqual(Operator.background, tokens[2].kind.operator);
-}
-
-test "Operators: capture" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "echo hi => out");
-
-    try testing.expectEqual(@as(usize, 4), tokens.len);
-    try expectTokenKind(tokens[2], .operator);
-    try testing.expectEqual(Operator.capture, tokens[2].kind.operator);
-}
-
-test "Operators: capture lines" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "ls =>@ files");
+    const tokens = try ctx.tokenize("echo|cat");
 
     try testing.expectEqual(@as(usize, 3), tokens.len);
-    try expectTokenKind(tokens[1], .operator);
-    try testing.expectEqual(Operator.capture_lines, tokens[1].kind.operator);
-}
-
-test "Operators: redirections" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "cmd < in > out >> append 2> err 2>&1");
-
-    try testing.expectEqual(@as(usize, 10), tokens.len);
-    try testing.expectEqual(Operator.redirect_stdin, tokens[1].kind.operator);
-    try testing.expectEqual(Operator.redirect_stdout, tokens[3].kind.operator);
-    try testing.expectEqual(Operator.redirect_stdout_append, tokens[5].kind.operator);
-    try testing.expectEqual(Operator.redirect_stderr, tokens[7].kind.operator);
-    try testing.expectEqual(Operator.redirect_stderr_to_stdout, tokens[9].kind.operator);
-}
-
-test "Operators: adjacent to word" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "echo|cat");
-
-    try testing.expectEqual(@as(usize, 3), tokens.len);
-    try expectBareWord(tokens[0].kind.word, "echo");
+    try TestContext.expectBareWord(tokens[0].kind.word, "echo");
     try testing.expectEqual(Operator.pipe, tokens[1].kind.operator);
-    try expectBareWord(tokens[2].kind.word, "cat");
+    try TestContext.expectBareWord(tokens[2].kind.word, "cat");
 }
 
-test "Separators: semicolon" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Separators
+// -----------------------------------------------------------------------------
 
-    const tokens = try tokenizeTest(&arena, "echo a; echo b");
+test "Separators: semicolon and newline" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 5), tokens.len);
-    try expectTokenKind(tokens[2], .separator);
+    const semi = try ctx.tokenize("echo a; echo b");
+    try testing.expectEqual(@as(usize, 5), semi.len);
+    try testing.expectEqual(Separator.semicolon, semi[2].kind.separator);
+
+    const newline = try ctx.tokenize("echo a\necho b");
+    try testing.expectEqual(@as(usize, 5), newline.len);
+    try testing.expectEqual(Separator.newline, newline[2].kind.separator);
 }
 
-test "Separators: newline" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Comments
+// -----------------------------------------------------------------------------
 
-    const tokens = try tokenizeTest(&arena, "echo a\necho b");
+test "Comments: trailing comment ignored, hash in word preserved" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 5), tokens.len);
-    try expectTokenKind(tokens[2], .separator);
-    try testing.expectEqual(Separator.newline, tokens[2].kind.separator);
+    // Trailing comment is stripped
+    const trailing = try ctx.tokenize("echo hello # this is a comment");
+    try testing.expectEqual(@as(usize, 2), trailing.len);
+
+    // Hash inside word is preserved
+    const inside = try ctx.tokenize("echo foo#bar");
+    try testing.expectEqual(@as(usize, 2), inside.len);
+    try TestContext.expectBareWord(inside[1].kind.word, "foo#bar");
 }
 
-test "Comments: trailing comment" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Edge Cases
+// -----------------------------------------------------------------------------
 
-    const tokens = try tokenizeTest(&arena, "echo hello # this is a comment");
+test "Edge cases: empty and whitespace-only input" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 2), tokens.len);
+    const empty = try ctx.tokenize("");
+    try testing.expectEqual(@as(usize, 0), empty.len);
+
+    const whitespace = try ctx.tokenize("   \t  ");
+    try testing.expectEqual(@as(usize, 0), whitespace.len);
 }
 
-test "Comments: hash inside bare word" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+// -----------------------------------------------------------------------------
+// Error Cases
+// -----------------------------------------------------------------------------
 
-    const tokens = try tokenizeTest(&arena, "echo foo#bar");
+test "Errors: unterminated strings and substitutions" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    try testing.expectEqual(@as(usize, 2), tokens.len);
-    try expectTokenKind(tokens[1], .word);
-    try expectBareWord(tokens[1].kind.word, "foo#bar");
-}
-
-test "Edge cases: empty input" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "");
-    try testing.expectEqual(@as(usize, 0), tokens.len);
-}
-
-test "Edge cases: whitespace only" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const tokens = try tokenizeTest(&arena, "   \t  ");
-
-    try testing.expectEqual(@as(usize, 0), tokens.len);
-}
-
-test "Errors: unterminated single quote" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    var lex = Lexer.init(arena.allocator(), "echo 'hello");
-    try testing.expectError(LexError.UnterminatedString, lex.tokenize());
-}
-
-test "Errors: unterminated double quote" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    var lex = Lexer.init(arena.allocator(), "echo \"hello");
-    try testing.expectError(LexError.UnterminatedString, lex.tokenize());
-}
-
-test "Errors: unterminated command substitution" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    var lex = Lexer.init(arena.allocator(), "echo $(whoami");
-    try testing.expectError(LexError.UnterminatedCmdSub, lex.tokenize());
+    try ctx.expectError("echo 'hello", LexError.UnterminatedString);
+    try ctx.expectError("echo \"hello", LexError.UnterminatedString);
+    try ctx.expectError("echo $(whoami", LexError.UnterminatedCmdSub);
 }

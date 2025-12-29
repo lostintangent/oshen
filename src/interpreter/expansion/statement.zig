@@ -214,7 +214,7 @@ test "simple command" {
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     // Expand the pipeline at execution time
-    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
     const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd_expanded = expanded_cmds[0];
     try testing.expectEqual(@as(usize, 3), cmd_expanded.argv.len);
@@ -229,7 +229,7 @@ test "pipeline normalizes |> to |" {
 
     const prog = try expandInput(arena.allocator(), "cat file |> grep foo");
 
-    const pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const pipeline = prog.statements[0].command.chains[0].pipeline;
     try testing.expectEqual(@as(usize, 2), pipeline.commands.len);
 }
 
@@ -248,7 +248,7 @@ test "with variable expansion" {
     const prog = try expandInput(arena.allocator(), "echo $name");
 
     // Expand the pipeline at execution time
-    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
     const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd_expanded = expanded_cmds[0];
     try testing.expectEqual(@as(usize, 2), cmd_expanded.argv.len);
@@ -268,7 +268,7 @@ test "with env prefix" {
     const prog = try expandInput(arena.allocator(), "FOO=bar env");
 
     // Expand the pipeline at execution time
-    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
     const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd_expanded = expanded_cmds[0];
     try testing.expectEqual(@as(usize, 1), cmd_expanded.env.len);
@@ -282,8 +282,8 @@ test "capture preserved" {
 
     const prog = try expandInput(arena.allocator(), "whoami => user");
 
-    try testing.expectEqualStrings("user", prog.statements[0].kind.command.capture.?.variable);
-    try testing.expectEqual(ast.CaptureMode.string, prog.statements[0].kind.command.capture.?.mode);
+    try testing.expectEqualStrings("user", prog.statements[0].command.capture.?.variable);
+    try testing.expectEqual(ast.CaptureMode.string, prog.statements[0].command.capture.?.mode);
 }
 
 test "background preserved" {
@@ -292,7 +292,7 @@ test "background preserved" {
 
     const prog = try expandInput(arena.allocator(), "sleep 10 &");
 
-    try testing.expectEqual(true, prog.statements[0].kind.command.background);
+    try testing.expectEqual(true, prog.statements[0].command.background);
 }
 
 test "redirect: variable expansion in path" {
@@ -309,7 +309,7 @@ test "redirect: variable expansion in path" {
 
     const prog = try expandInput(arena.allocator(), "echo test > $outfile");
 
-    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
     const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd = expanded_cmds[0];
 
@@ -333,7 +333,7 @@ test "redirect: double-quoted path with spaces" {
 
     const prog = try expandInput(arena.allocator(), "echo test > \"foo bar.txt\"");
 
-    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
     const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd = expanded_cmds[0];
 
@@ -361,7 +361,7 @@ test "redirect: single-quoted path prevents expansion" {
 
     const prog = try expandInput(arena.allocator(), "echo test > '$var.txt'");
 
-    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
     const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd = expanded_cmds[0];
 
@@ -389,7 +389,7 @@ test "redirect: double-quoted path expands variables" {
 
     const prog = try expandInput(arena.allocator(), "echo test > \"$name.txt\"");
 
-    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
     const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd = expanded_cmds[0];
 

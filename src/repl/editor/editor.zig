@@ -17,7 +17,7 @@ const history = @import("history.zig");
 const highlight = @import("ui/highlight.zig");
 const suggest = @import("ui/suggest.zig");
 const complete = @import("ui/complete.zig");
-const text_utils = @import("../text_utils.zig");
+const repl = @import("../repl.zig");
 const State = @import("../../runtime/state.zig").State;
 const ansi = @import("../../terminal/ansi.zig");
 const tui = @import("../../terminal/tui.zig");
@@ -27,9 +27,27 @@ const posix = std.posix;
 const Termios = std.posix.termios;
 const system = std.posix.system;
 
-// Re-export word boundary functions from text_utils for internal use
-const findWordBoundaryLeft = text_utils.findWordBoundaryLeft;
-const findWordBoundaryRight = text_utils.findWordBoundaryRight;
+// =============================================================================
+// Word Boundaries
+// =============================================================================
+
+/// Find the position of the previous word boundary (moving left).
+/// Skips trailing whitespace, then skips the word.
+fn findWordBoundaryLeft(buf: []const u8, cursor: usize) usize {
+    var pos = cursor;
+    while (pos > 0 and repl.isWordBreak(buf[pos - 1])) pos -= 1;
+    while (pos > 0 and !repl.isWordBreak(buf[pos - 1])) pos -= 1;
+    return pos;
+}
+
+/// Find the position of the next word boundary (moving right).
+/// Skips the current word, then skips whitespace.
+fn findWordBoundaryRight(buf: []const u8, cursor: usize) usize {
+    var pos = cursor;
+    while (pos < buf.len and !repl.isWordBreak(buf[pos])) pos += 1;
+    while (pos < buf.len and repl.isWordBreak(buf[pos])) pos += 1;
+    return pos;
+}
 
 // =============================================================================
 // Terminal I/O
@@ -579,134 +597,130 @@ pub const Editor = struct {
 // Tests
 // =============================================================================
 
-test "buffer: insert at end" {
-    const allocator = std.testing.allocator;
-    var editor = Editor.initForTest(allocator);
-    defer editor.deinit();
+const testing = std.testing;
 
-    try editor.buf.insert(allocator, 0, 'h');
-    editor.cursor = 1;
-    try editor.buf.insert(allocator, 1, 'i');
-    editor.cursor = 2;
+const TestContext = struct {
+    editor: Editor,
 
-    try std.testing.expectEqualStrings("hi", editor.getBuffer());
-    try std.testing.expectEqual(@as(usize, 2), editor.cursor);
-}
-
-test "buffer: insert in middle" {
-    const allocator = std.testing.allocator;
-    var editor = Editor.initForTest(allocator);
-    defer editor.deinit();
-
-    try editor.setBuffer("hllo");
-    editor.cursor = 1;
-    try editor.buf.insert(allocator, 1, 'e');
-    editor.cursor = 2;
-
-    try std.testing.expectEqualStrings("hello", editor.getBuffer());
-}
-
-test "buffer: delete backward" {
-    const allocator = std.testing.allocator;
-    var editor = Editor.initForTest(allocator);
-    defer editor.deinit();
-
-    try editor.setBuffer("hello");
-    _ = editor.buf.orderedRemove(editor.cursor - 1);
-    editor.cursor -= 1;
-
-    try std.testing.expectEqualStrings("hell", editor.getBuffer());
-    try std.testing.expectEqual(@as(usize, 4), editor.cursor);
-}
-
-test "buffer: delete forward" {
-    const allocator = std.testing.allocator;
-    var editor = Editor.initForTest(allocator);
-    defer editor.deinit();
-
-    try editor.setBuffer("hello");
-    editor.cursor = 0;
-    _ = editor.buf.orderedRemove(0);
-
-    try std.testing.expectEqualStrings("ello", editor.getBuffer());
-}
-
-test "cursor: basic movement" {
-    const allocator = std.testing.allocator;
-    var editor = Editor.initForTest(allocator);
-    defer editor.deinit();
-
-    try editor.setBuffer("hello world");
-    editor.cursor = 5;
-
-    // Home
-    editor.cursor = 0;
-    try std.testing.expectEqual(@as(usize, 0), editor.cursor);
-
-    // End
-    editor.cursor = editor.buf.items.len;
-    try std.testing.expectEqual(@as(usize, 11), editor.cursor);
-
-    // Left/Right
-    editor.cursor = 5;
-    editor.cursor -= 1;
-    try std.testing.expectEqual(@as(usize, 4), editor.cursor);
-    editor.cursor += 1;
-    try std.testing.expectEqual(@as(usize, 5), editor.cursor);
-}
-
-test "word boundary: left" {
-    try std.testing.expectEqual(@as(usize, 6), findWordBoundaryLeft("hello world", 11));
-    try std.testing.expectEqual(@as(usize, 0), findWordBoundaryLeft("hello world", 6));
-    try std.testing.expectEqual(@as(usize, 0), findWordBoundaryLeft("hello", 5));
-}
-
-test "word boundary: right" {
-    try std.testing.expectEqual(@as(usize, 6), findWordBoundaryRight("hello world", 0));
-    try std.testing.expectEqual(@as(usize, 11), findWordBoundaryRight("hello world", 6));
-}
-
-test "kill: to end of line" {
-    const allocator = std.testing.allocator;
-    var editor = Editor.initForTest(allocator);
-    defer editor.deinit();
-
-    try editor.setBuffer("hello world");
-    editor.cursor = 5;
-    editor.buf.shrinkRetainingCapacity(editor.cursor);
-
-    try std.testing.expectEqualStrings("hello", editor.getBuffer());
-}
-
-test "kill: to start of line" {
-    const allocator = std.testing.allocator;
-    var editor = Editor.initForTest(allocator);
-    defer editor.deinit();
-
-    try editor.setBuffer("hello world");
-    editor.cursor = 6;
-
-    std.mem.copyForwards(u8, editor.buf.items[0..], editor.buf.items[editor.cursor..]);
-    editor.buf.shrinkRetainingCapacity(editor.buf.items.len - editor.cursor);
-    editor.cursor = 0;
-
-    try std.testing.expectEqualStrings("world", editor.getBuffer());
-}
-
-test "kill: previous word" {
-    const allocator = std.testing.allocator;
-    var editor = Editor.initForTest(allocator);
-    defer editor.deinit();
-
-    try editor.setBuffer("hello world");
-    editor.cursor = 11;
-
-    const end = editor.cursor;
-    editor.cursor = findWordBoundaryLeft(editor.buf.items, editor.cursor);
-    for (0..(end - editor.cursor)) |_| {
-        _ = editor.buf.orderedRemove(editor.cursor);
+    fn init() TestContext {
+        return .{ .editor = Editor.initForTest(testing.allocator) };
     }
 
-    try std.testing.expectEqualStrings("hello ", editor.getBuffer());
-    try std.testing.expectEqual(@as(usize, 6), editor.cursor);
+    fn deinit(self: *TestContext) void {
+        self.editor.deinit();
+    }
+
+    fn setBuffer(self: *TestContext, content: []const u8) !void {
+        try self.editor.setBuffer(content);
+    }
+
+    fn getBuffer(self: *TestContext) []const u8 {
+        return self.editor.getBuffer();
+    }
+
+    fn insert(self: *TestContext, pos: usize, char: u8) !void {
+        try self.editor.buf.insert(testing.allocator, pos, char);
+    }
+};
+
+// -----------------------------------------------------------------------------
+// Buffer Operations
+// -----------------------------------------------------------------------------
+
+test "Buffer: insert operations" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    // Insert at end
+    try ctx.insert(0, 'h');
+    ctx.editor.cursor = 1;
+    try ctx.insert(1, 'i');
+    ctx.editor.cursor = 2;
+    try testing.expectEqualStrings("hi", ctx.getBuffer());
+
+    // Insert in middle
+    try ctx.setBuffer("hllo");
+    ctx.editor.cursor = 1;
+    try ctx.insert(1, 'e');
+    try testing.expectEqualStrings("hello", ctx.getBuffer());
 }
+
+test "Buffer: delete operations" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    // Delete backward
+    try ctx.setBuffer("hello");
+    _ = ctx.editor.buf.orderedRemove(ctx.editor.cursor - 1);
+    ctx.editor.cursor -= 1;
+    try testing.expectEqualStrings("hell", ctx.getBuffer());
+
+    // Delete forward
+    try ctx.setBuffer("hello");
+    ctx.editor.cursor = 0;
+    _ = ctx.editor.buf.orderedRemove(0);
+    try testing.expectEqualStrings("ello", ctx.getBuffer());
+}
+
+// -----------------------------------------------------------------------------
+// Word Boundaries
+// -----------------------------------------------------------------------------
+
+test "findWordBoundaryLeft: moves to previous word start" {
+    const cases = [_]struct { []const u8, usize, usize }{
+        .{ "hello world", 11, 6 }, // end of second word
+        .{ "hello world", 6, 0 }, // start of second word
+        .{ "hello", 5, 0 }, // single word
+        .{ "hello", 0, 0 }, // already at start
+    };
+    for (cases) |c| try testing.expectEqual(c[2], findWordBoundaryLeft(c[0], c[1]));
+}
+
+test "findWordBoundaryRight: moves to next word start" {
+    const cases = [_]struct { []const u8, usize, usize }{
+        .{ "hello world", 0, 6 }, // from start
+        .{ "hello world", 3, 6 }, // from middle of first word
+        .{ "hello world", 6, 11 }, // from second word
+        .{ "hello", 5, 5 }, // already at end
+    };
+    for (cases) |c| try testing.expectEqual(c[2], findWordBoundaryRight(c[0], c[1]));
+}
+
+// -----------------------------------------------------------------------------
+// Kill Operations
+// -----------------------------------------------------------------------------
+
+test "Kill: to end of line" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+    try ctx.setBuffer("hello world");
+    ctx.editor.cursor = 5;
+    ctx.editor.buf.shrinkRetainingCapacity(ctx.editor.cursor);
+    try testing.expectEqualStrings("hello", ctx.getBuffer());
+}
+
+test "Kill: to start of line" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+    try ctx.setBuffer("hello world");
+    ctx.editor.cursor = 6;
+    std.mem.copyForwards(u8, ctx.editor.buf.items[0..], ctx.editor.buf.items[ctx.editor.cursor..]);
+    ctx.editor.buf.shrinkRetainingCapacity(ctx.editor.buf.items.len - ctx.editor.cursor);
+    ctx.editor.cursor = 0;
+    try testing.expectEqualStrings("world", ctx.getBuffer());
+}
+
+test "Kill: previous word" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+    try ctx.setBuffer("hello world");
+    ctx.editor.cursor = 11;
+    const end = ctx.editor.cursor;
+    ctx.editor.cursor = findWordBoundaryLeft(ctx.editor.buf.items, ctx.editor.cursor);
+    for (0..(end - ctx.editor.cursor)) |_| {
+        _ = ctx.editor.buf.orderedRemove(ctx.editor.cursor);
+    }
+    try testing.expectEqualStrings("hello ", ctx.getBuffer());
+    try testing.expectEqual(@as(usize, 6), ctx.editor.cursor);
+}
+

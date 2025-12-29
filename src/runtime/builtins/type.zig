@@ -1,22 +1,20 @@
 //! type builtin - show how a command would be interpreted
-const std = @import("std");
 const builtins = @import("../builtins.zig");
 const resolve = @import("../resolve.zig");
+const args = @import("../../terminal/args.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "type",
-    .run = run,
-    .help = "type <name>... - Show how a command would be interpreted",
-};
+const spec = args.Spec("type", .{
+    .desc = "Show how a command would be interpreted.",
+    .args = .{
+        .names = args.Rest(.{ .desc = "Command names to look up", .required = true }),
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    if (cmd.argv.len < 2) {
-        builtins.io.writeStderr("type: usage: type NAME...\n");
-        return 1;
-    }
+pub const builtin = builtins.fromSpec(spec, run);
 
+fn run(state: *builtins.State, r: spec.Result) u8 {
     var status: u8 = 0;
-    for (cmd.argv[1..]) |name| {
+    for (r.names) |name| {
         if (!showType(state, name)) {
             status = 1;
         }

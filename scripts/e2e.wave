@@ -71,6 +71,7 @@ test_case "Variable concatenation" "var a hello; var b world; echo \$a\$b" "hell
 test_case "Numeric variable" "var num 42; echo \$num" "42"
 test_case "Negative number" "var num -42; echo \$num" "-42"
 test_case "Variable with underscore" "var my_var test; echo \$my_var" "test"
+test_case "Variable with equals" "var x = hello; echo \$x" "hello"
 test_case "Unset variable" "var x hello; unset x; echo [\$x]" "[]"
 test_exit_code "Set query nonexistent returns 1" "set NONEXISTENT_VAR_12345" "1"
 
@@ -113,7 +114,7 @@ test_case "Cartesian prefix" "var xs a b; echo pre\$xs" "prea preb"
 # ============================================================================
 # Brace Expansion
 # ============================================================================
-print_header "Brace Expansion (8 tests)"
+print_header "Brace Expansion (14 tests)"
 
 test_case "Simple brace list" "echo {a,b,c}" "a b c"
 test_case "Brace with prefix" "echo pre_{a,b,c}" "pre_a pre_b pre_c"
@@ -123,6 +124,12 @@ test_case "Nested braces" "echo {a,b}_{1,2}" "a_1 a_2 b_1 b_2"
 test_case "Three-way expansion" "echo {x,y,z}" "x y z"
 test_case "Single item brace" "echo {a}" "a"
 test_case "Multiple brace sets" "echo {1,2} {a,b}" "1 2 a b"
+test_case "Range ascending" "echo {1..5}" "1 2 3 4 5"
+test_case "Range descending" "echo {5..1}" "5 4 3 2 1"
+test_case "Range with prefix" "echo file{1..3}.txt" "file1.txt file2.txt file3.txt"
+test_case "Range negative" "echo {-2..2}" "-2 -1 0 1 2"
+test_case "Range single" "echo {5..5}" "5"
+test_case "Range and list" "echo {1..3} {a,b}" "1 2 3 a b"
 
 # ============================================================================
 # Quoting and Escaping
@@ -532,7 +539,7 @@ test_case "Hash in single quotes" "echo 'number #1'" "number #1"
 # ============================================================================
 # Additional Test Operators
 # ============================================================================
-print_header "Additional Test Operators (6 tests)"
+print_header "Additional Test Operators (16 tests)"
 
 test_exit_code "Test -le less equal" "test 5 -le 5" "0"
 test_exit_code "Test -le less" "test 3 -le 5" "0"
@@ -540,6 +547,20 @@ test_exit_code "Test -ge greater equal" "test 5 -ge 5" "0"
 test_exit_code "Test -ge greater" "test 7 -ge 5" "0"
 test_case "Bracket test syntax" "if [ 1 -eq 1 ]; echo bracket; end" "bracket"
 test_case "Bracket test with var" "var x 5; if [ \$x -gt 3 ]; echo big; end" "big"
+
+# Logical operators -a (AND) and -o (OR)
+test_exit_code "Test -a both true" "test -n hello -a -n world" "0"
+test_exit_code "Test -a first false" 'test -z "hello" -a -n world' "1"
+test_exit_code "Test -a second false" 'test -n hello -a -z "world"' "1"
+test_exit_code "Test -o both false" 'test -z "hello" -o -z "world"' "1"
+test_exit_code "Test -o first true" "test -n hello -o -z world" "0"
+test_exit_code "Test -o second true" 'test -z "hello" -o -n world' "0"
+
+# Parentheses grouping
+test_exit_code "Test parens simple" 'test "(" -n hello ")"' "0"
+test_exit_code "Test parens with -a" 'test "(" 5 -gt 3 -a 2 -lt 4 ")"' "0"
+test_exit_code "Test parens with -o" 'test "(" 1 -eq 2 -o 3 -eq 3 ")"' "0"
+test_case "Test complex conditional" 'if test "(" 5 -gt 3 -a 2 -lt 10 ")"; echo complex; end' "complex"
 
 # ============================================================================
 # Function Arg Count
@@ -679,8 +700,8 @@ print_header "Increment Builtin (9 tests)"
 
 # Basic increment
 test_case "Increment by 1" 'var count 5; increment count; echo $count' "6"
-test_case "Increment by 5" 'var count 10; increment count --by 5; echo $count' "15"
-test_case "Increment by negative (decrement)" 'var count 10; increment count --by -3; echo $count' "7"
+test_case "Increment by 5" 'var count 10; increment --by 5 count; echo $count' "15"
+test_case "Increment by negative (decrement)" 'var count 10; increment --by -3 count; echo $count' "7"
 test_case "Increment from 0" 'var count 0; increment count; echo $count' "1"
 test_case "Increment negative number" 'var count -5; increment count; echo $count' "-4"
 test_case "Increment multiple times" 'var n 1; increment n; increment n; increment n; echo $n' "4"
@@ -688,7 +709,93 @@ test_case "Increment multiple times" 'var n 1; increment n; increment n; increme
 # Error handling
 test_exit_code "Increment nonexistent variable" 'increment nonexistent' "1"
 test_exit_code "Increment non-numeric variable" 'var text hello; increment text' "1"
-test_exit_code "Increment with non-numeric --by" 'var count 5; increment count --by abc' "1"
+test_exit_code "Increment with non-numeric --by" 'var count 5; increment --by abc count' "1"
+
+# ============================================================================
+# String Builtin
+# ============================================================================
+print_header "String Builtin (46 tests)"
+
+# Basic transformations (no trailing newline - use echo to display)
+test_case "String upper" 'echo $(string --upper hello)' "HELLO"
+test_case "String lower" 'echo $(string --lower WORLD)' "world"
+test_case "String trim" 'echo $(string --trim "  hello  ")' "hello"
+test_case "String reverse" 'echo $(string --reverse hello)' "olleh"
+
+# Combined transformations
+test_case "String trim upper" 'echo $(string --trim --upper "  hello  ")' "HELLO"
+test_case "String reverse upper" 'echo $(string --reverse --upper hello)' "OLLEH"
+test_case "String trim reverse lower" 'echo $(string --trim --reverse --lower "  HELLO  ")' "olleh"
+
+# Multiple strings
+test_case "String upper multiple" 'echo $(string --upper hello world)' "HELLO WORLD"
+test_case "String lower multiple" 'echo $(string --lower FOO BAR BAZ)' "foo bar baz"
+
+# Length
+test_case "String length" 'echo $(string --length hello)' "5"
+test_case "String length multiple" 'string --length foo barbaz' "3\n6"
+test_case "String length with trim" 'echo $(string --trim --length "  hi  ")' "2"
+
+# Split (split outputs newline-separated values)
+test_case "String split colon" 'string --split : "a:b:c"' "a\nb\nc"
+test_case "String split comma" 'string --split , "x,y,z"' "x\ny\nz"
+test_case "String split multi-char" 'string --split :: "a::b::c"' "a\nb\nc"
+
+# Join
+test_case "String join dash" 'echo $(string --join - a b c)' "a-b-c"
+test_case "String join comma" 'echo $(string --join ", " foo bar baz)' "foo, bar, baz"
+test_case "String join empty" 'echo $(string --join "" a b c)' "abc"
+
+# Replace
+test_case "String replace simple" 'echo $(string --replace o 0 hello)' "hell0"
+test_case "String replace all" 'echo $(string --replace o 0 "hello world foo")' "hell0 w0rld f00"
+test_case "String replace multi-char" 'echo $(string --replace foo bar "foobar foobaz")' "barbar barbaz"
+
+# Substring
+test_case "String sub from start" 'echo $(string --sub 1 3 hello)' "hel"
+test_case "String sub middle" 'echo $(string --sub 2 3 hello)' "ell"
+test_case "String sub to end" 'echo $(string --sub 3 hello)' "llo"
+test_case "String sub negative" 'echo $(string --sub -3 hello)' "llo"
+test_case "String sub negative with len" 'echo $(string --sub -4 2 hello)' "el"
+
+# Repeat
+test_case "String repeat 3" 'echo $(string --repeat 3 ab)' "ababab"
+test_case "String repeat 1" 'echo $(string --repeat 1 test)' "test"
+test_case "String repeat 0" 'echo "$(string --repeat 0 test)"' ""
+
+# Padding (--pad is right-pad, --pad-left is left-pad)
+test_case "String pad-left" 'echo $(string --pad-left 8 hello)' "   hello"
+test_case "String pad-left with char" 'echo $(string --pad-left 8 0 42)' "00000042"
+test_case "String pad" 'echo "[$(string --pad 10 hello)]"' "[hello     ]"
+test_case "String pad with char" 'echo $(string --pad 10 . file)' "file......"
+
+# Pattern matching
+test_exit_code "String match success" 'string --match "*.txt" "file.txt"' "0"
+test_exit_code "String match failure" 'string --match "*.txt" "file.md"' "1"
+test_exit_code "String match wildcard" 'string --match "*hello*" "say hello world"' "0"
+test_exit_code "String match question" 'string --match "test?" "test1"' "0"
+test_exit_code "String match char class" 'string --match "[0-9]*" "123abc"' "0"
+test_exit_code "String match negated class" 'string --match "[!0-9]*" "abc123"' "0"
+
+# Contains
+test_exit_code "String contains success" 'string --contains foo "foobar"' "0"
+test_exit_code "String contains failure" 'string --contains baz "foobar"' "1"
+test_exit_code "String contains multi" 'string --contains o "hello" "world"' "0"
+test_exit_code "String contains with transform" 'string --upper --contains HELLO "hello world"' "0"
+
+# ============================================================================
+# Range Builtin
+# ============================================================================
+print_header "Range Builtin (8 tests)"
+
+test_case "Range to 3" 'range 3' "1\n2\n3"
+test_case "Range 2 to 5" 'range 2 5' "2\n3\n4\n5"
+test_case "Range with step" 'range --step 2 1 7' "1\n3\n5\n7"
+test_case "Range with step short" 'range -s 3 0 9' "0\n3\n6\n9"
+test_case "Range countdown auto" 'range 5 1' "5\n4\n3\n2\n1"
+test_case "Range countdown explicit" 'range --step -2 10 0' "10\n8\n6\n4\n2\n0"
+test_case "Range single" 'range 1' "1"
+test_exit_code "Range zero step fails" 'range --step 0 1 5' "1"
 
 # ============================================================================
 # Print Summary

@@ -9,7 +9,6 @@ terminal clear
 var OSHEN ./zig-out/bin/oshen
 var shells zsh fish elvish
 
-# Benchmark oshen first (using local build)
 print -n --yellow "⏳ oshen"
 time -p $OSHEN $DIR/script.oshen => timing
 terminal clear

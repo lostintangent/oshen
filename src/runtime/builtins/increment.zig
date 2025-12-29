@@ -1,61 +1,44 @@
 //! increment builtin - increment or decrement a variable's value
-//!
-//! Provides a clean, ergonomic way to increment numeric variables without
-//! needing nested math expressions and command substitution.
-//!
-//! Syntax:
-//!   increment <varname>           - Increment variable by 1
-//!   increment <varname> --by <n>  - Increment variable by n (can be negative)
-//!
-//! Examples:
-//!   increment count              → count = count + 1
-//!   increment count --by 5       → count = count + 5
-//!   increment count --by -3      → count = count - 3
 
 const std = @import("std");
 const builtins = @import("../builtins.zig");
+const args = @import("../../terminal/args.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "increment",
-    .run = run,
-    .help = "increment <varname> [--by <n>] - Increment variable by n (default: 1)",
-};
+const spec = args.Spec("increment", .{
+    .desc = "Increment or decrement a variable's numeric value.",
+    .args = .{
+        .by = args.I64Option(.{ .short = "b", .long = "by", .desc = "Amount to increment", .default = 1 }),
+        .varname = args.StringPositional(.{ .desc = "Variable to increment" }),
+    },
+    .examples = &.{
+        "increment count         # count = count + 1",
+        "increment --by 5 count  # count = count + 5",
+        "increment --by -3 count # count = count - 3",
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    const argv = cmd.argv;
+pub const builtin = builtins.fromSpec(spec, run);
 
-    if (argv.len < 2) {
-        builtins.io.printError("increment: usage: increment <varname> [--by <n>]\n", .{});
-        return 1;
-    }
-
-    const var_name = argv[1];
-    const increment_by = parseIncrementAmount(argv[2..]) catch |err| {
-        return reportParseError(err, argv);
-    };
-
-    const current_str = state.getVar(var_name) orelse {
-        builtins.io.printError("increment: variable '{s}' does not exist\n", .{var_name});
+fn run(state: *builtins.State, r: spec.Result) u8 {
+    const current_str = state.getVar(r.varname) orelse {
+        builtins.io.printError("increment: variable '{s}' does not exist\n", .{r.varname});
         return 1;
     };
 
     const current_val = std.fmt.parseInt(i64, current_str, 10) catch {
-        builtins.io.printError("increment: variable '{s}' is not a number (value: '{s}')\n", .{ var_name, current_str });
+        builtins.io.printError("increment: '{s}' is not a number\n", .{r.varname});
         return 1;
     };
 
-    const new_val = std.math.add(i64, current_val, increment_by) catch {
+    const new_val = std.math.add(i64, current_val, r.by) catch {
         builtins.io.printError("increment: integer overflow\n", .{});
         return 1;
     };
 
-    // Format the new value - i64 range is -9,223,372,036,854,775,808 to 9,223,372,036,854,775,807
-    // which is at most 20 digits plus a minus sign, so 32 bytes is more than sufficient
     var buf: [32]u8 = undefined;
     const new_str = std.fmt.bufPrint(&buf, "{d}", .{new_val}) catch unreachable;
 
-    // Set the new value - scope-based allocation handles performance
-    state.setVar(var_name, new_str) catch {
+    state.setVar(r.varname, new_str) catch {
         builtins.io.printError("increment: out of memory\n", .{});
         return 1;
     };
@@ -64,167 +47,94 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
 }
 
 // =============================================================================
-// Helper Functions
-// =============================================================================
-
-const ParseError = error{
-    InvalidOption,
-    MissingValue,
-    InvalidNumber,
-    TooManyArgs,
-};
-
-/// Parse the --by option and return the increment amount.
-fn parseIncrementAmount(args: []const []const u8) ParseError!i64 {
-    return switch (args.len) {
-        0 => 1, // Default increment
-        1 => if (std.mem.eql(u8, args[0], "--by")) error.MissingValue else error.InvalidOption,
-        2 => blk: {
-            if (!std.mem.eql(u8, args[0], "--by")) break :blk error.InvalidOption;
-            break :blk std.fmt.parseInt(i64, args[1], 10) catch error.InvalidNumber;
-        },
-        else => error.TooManyArgs,
-    };
-}
-
-fn reportParseError(err: ParseError, argv: []const []const u8) u8 {
-    switch (err) {
-        error.InvalidOption => builtins.io.printError("increment: invalid option '{s}' (expected --by)\n", .{argv[2]}),
-        error.MissingValue => builtins.io.printError("increment: --by option requires a value\n", .{}),
-        error.InvalidNumber => builtins.io.printError("increment: --by value '{s}' is not a valid number\n", .{argv[3]}),
-        error.TooManyArgs => builtins.io.printError("increment: too many arguments\n", .{}),
-    }
-    return 1;
-}
-
-// =============================================================================
 // Tests
 // =============================================================================
 
 const testing = std.testing;
-const test_utils = @import("testing.zig");
 const State = @import("../state.zig").State;
 
-fn testWithState(comptime f: fn (*State) anyerror!void) !void {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var state = State.init(arena.allocator());
-    state.initCurrentScope();
-    defer state.deinit();
-    try f(&state);
-}
-
 fn runIncrement(state: *State, argv: []const []const u8) u8 {
-    return run(state, test_utils.makeCmd(argv));
+    const r = spec.parse(argv) catch return 1;
+    return run(state, r);
 }
 
-test "basic: increment by 1" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("count", "5");
-            try testing.expectEqual(@as(u8, 0), runIncrement(state, &.{ "increment", "count" }));
-            try testing.expectEqualStrings("6", state.getVar("count").?);
-        }
-    }.f);
+// -----------------------------------------------------------------------------
+// Basic Operations (table-driven)
+// -----------------------------------------------------------------------------
+
+test "increment: basic operations" {
+    const cases = [_]struct {
+        initial: []const u8,
+        argv: []const []const u8,
+        expected: []const u8,
+    }{
+        // Increment by 1 (default)
+        .{ .initial = "5", .argv = &.{ "increment", "count" }, .expected = "6" },
+        // Increment from zero
+        .{ .initial = "0", .argv = &.{ "increment", "count" }, .expected = "1" },
+        // Increment negative number
+        .{ .initial = "-5", .argv = &.{ "increment", "count" }, .expected = "-4" },
+        // Custom increment amount
+        .{ .initial = "10", .argv = &.{ "increment", "--by", "5", "count" }, .expected = "15" },
+        // Decrement with negative value
+        .{ .initial = "10", .argv = &.{ "increment", "--by", "-3", "count" }, .expected = "7" },
+        // Large increment
+        .{ .initial = "0", .argv = &.{ "increment", "--by", "100", "count" }, .expected = "100" },
+        // Short flag
+        .{ .initial = "1", .argv = &.{ "increment", "-b", "9", "count" }, .expected = "10" },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var state = State.init(arena.allocator());
+        state.initCurrentScope();
+        defer state.deinit();
+
+        try state.setVar("count", case.initial);
+        try testing.expectEqual(@as(u8, 0), runIncrement(&state, case.argv));
+        try testing.expectEqualStrings(case.expected, state.getVar("count").?);
+    }
 }
 
-test "basic: increment by custom amount" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("count", "10");
-            try testing.expectEqual(@as(u8, 0), runIncrement(state, &.{ "increment", "count", "--by", "5" }));
-            try testing.expectEqualStrings("15", state.getVar("count").?);
-        }
-    }.f);
-}
+// -----------------------------------------------------------------------------
+// Error Cases (table-driven)
+// -----------------------------------------------------------------------------
 
-test "basic: decrement with negative value" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("count", "10");
-            try testing.expectEqual(@as(u8, 0), runIncrement(state, &.{ "increment", "count", "--by", "-3" }));
-            try testing.expectEqualStrings("7", state.getVar("count").?);
-        }
-    }.f);
-}
+test "increment: error cases" {
+    const cases = [_]struct {
+        setup_var: ?[]const u8, // null = don't set any variable
+        setup_val: []const u8,
+        argv: []const []const u8,
+    }{
+        // Nonexistent variable
+        .{ .setup_var = null, .setup_val = "", .argv = &.{ "increment", "nonexistent" } },
+        // Non-numeric variable
+        .{ .setup_var = "text", .setup_val = "hello", .argv = &.{ "increment", "text" } },
+        // Invalid --by value
+        .{ .setup_var = "count", .setup_val = "5", .argv = &.{ "increment", "--by", "abc", "count" } },
+        // Missing --by value
+        .{ .setup_var = "count", .setup_val = "5", .argv = &.{ "increment", "--by" } },
+        // Too many arguments
+        .{ .setup_var = "count", .setup_val = "5", .argv = &.{ "increment", "--by", "1", "count", "extra" } },
+        // Invalid option
+        .{ .setup_var = "count", .setup_val = "5", .argv = &.{ "increment", "--invalid", "1", "count" } },
+        // Missing variable name
+        .{ .setup_var = null, .setup_val = "", .argv = &.{"increment"} },
+        // Empty variable value (not a number)
+        .{ .setup_var = "count", .setup_val = "", .argv = &.{ "increment", "count" } },
+    };
 
-test "basic: increment from zero" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("count", "0");
-            try testing.expectEqual(@as(u8, 0), runIncrement(state, &.{ "increment", "count" }));
-            try testing.expectEqualStrings("1", state.getVar("count").?);
-        }
-    }.f);
-}
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var state = State.init(arena.allocator());
+        state.initCurrentScope();
+        defer state.deinit();
 
-test "basic: increment negative number" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("count", "-5");
-            try testing.expectEqual(@as(u8, 0), runIncrement(state, &.{ "increment", "count" }));
-            try testing.expectEqualStrings("-4", state.getVar("count").?);
+        if (case.setup_var) |name| {
+            try state.setVar(name, case.setup_val);
         }
-    }.f);
-}
-
-test "error: nonexistent variable" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try testing.expectEqual(@as(u8, 1), runIncrement(state, &.{ "increment", "nonexistent" }));
-        }
-    }.f);
-}
-
-test "error: non-numeric variable" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("text", "hello");
-            try testing.expectEqual(@as(u8, 1), runIncrement(state, &.{ "increment", "text" }));
-        }
-    }.f);
-}
-
-test "error: invalid --by value" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("count", "5");
-            try testing.expectEqual(@as(u8, 1), runIncrement(state, &.{ "increment", "count", "--by", "abc" }));
-        }
-    }.f);
-}
-
-test "error: missing --by value" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("count", "5");
-            try testing.expectEqual(@as(u8, 1), runIncrement(state, &.{ "increment", "count", "--by" }));
-        }
-    }.f);
-}
-
-test "error: too many arguments" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("count", "5");
-            try testing.expectEqual(@as(u8, 1), runIncrement(state, &.{ "increment", "count", "--by", "1", "extra" }));
-        }
-    }.f);
-}
-
-test "error: invalid option" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try state.setVar("count", "5");
-            try testing.expectEqual(@as(u8, 1), runIncrement(state, &.{ "increment", "count", "--invalid", "1" }));
-        }
-    }.f);
-}
-
-test "error: missing variable name" {
-    try testWithState(struct {
-        fn f(state: *State) !void {
-            try testing.expectEqual(@as(u8, 1), runIncrement(state, &.{"increment"}));
-        }
-    }.f);
+        try testing.expectEqual(@as(u8, 1), runIncrement(&state, case.argv));
+    }
 }

@@ -2,6 +2,8 @@
 //!
 //! In interactive mode, displays a TUI for selecting jobs.
 //! In non-interactive mode (pipes, redirects), prints a simple list.
+//!
+//! NOTE: No unit or E2E tests - requires TTY and real process groups.
 
 const std = @import("std");
 const builtins = @import("../builtins.zig");

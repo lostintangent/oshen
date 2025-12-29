@@ -137,6 +137,11 @@ pub fn executeAstWithArena(arena_alloc: std.mem.Allocator, state: *State, parsed
             return state.exit_code;
         }
 
+        // Interrupt signals bubble up to abort the current command
+        if (state.interrupted) {
+            return last_status;
+        }
+
         // Break/continue signals bubble up to the enclosing loop
         if (state.loop_break or state.loop_continue) {
             return last_status;
@@ -205,7 +210,7 @@ pub fn executeAndCapture(allocator: std.mem.Allocator, state: *State, input: []c
     // Fast path: try to parse as a simple builtin for in-process capture
     if (tryParseAndExpandBuiltin(allocator, state, input)) |result| {
         defer result.arena.deinit();
-        defer result.expanded.deinit(result.arena.child_allocator);
+        // Note: expanded data is arena-allocated, freed automatically by arena.deinit()
         const captured = try capture.captureBuiltin(allocator, state, result.expanded.cmd);
         return captured.output;
     }
@@ -237,15 +242,23 @@ const ParsedBuiltin = struct {
 /// Returns null if parsing fails or the command is too complex.
 fn tryParseAndExpandBuiltin(backing: std.mem.Allocator, state: *State, input: []const u8) ?ParsedBuiltin {
     var arena = std.heap.ArenaAllocator.init(backing);
-    errdefer arena.deinit();
     const alloc = arena.allocator();
 
     // Parse input and extract command statement
-    const parsed = parseInput(alloc, input) catch return null;
-    const cmd_stmt = getSimpleCommandStatement(parsed) orelse return null;
+    const parsed = parseInput(alloc, input) catch {
+        arena.deinit();
+        return null;
+    };
+    const cmd_stmt = getSimpleCommandStatement(parsed) orelse {
+        arena.deinit();
+        return null;
+    };
 
     // Use shared builtin detection/expansion
-    const expanded = capture.tryExpandSimpleBuiltin(alloc, state, cmd_stmt) orelse return null;
+    const expanded = capture.tryExpandSimpleBuiltin(alloc, state, cmd_stmt) orelse {
+        arena.deinit();
+        return null;
+    };
 
     return .{ .expanded = expanded, .arena = arena };
 }

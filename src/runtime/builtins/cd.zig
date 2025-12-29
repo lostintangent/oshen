@@ -1,22 +1,31 @@
 const std = @import("std");
 const builtins = @import("../builtins.zig");
+const args = @import("../../terminal/args.zig");
 const tui = @import("../../terminal/tui.zig");
 
-pub const builtin = builtins.Builtin{
-    .name = "cd",
-    .help = "cd [dir] - Change current directory (defaults to $HOME)",
-    .run = run,
-};
+const spec = args.Spec("cd", .{
+    .desc = "Change current directory.",
+    .args = .{
+        .dir = args.StringPositional(.{ .desc = "Target directory", .default = "" }),
+    },
+    .examples = &.{
+        "cd           # Go to $HOME",
+        "cd /tmp      # Go to /tmp",
+        "cd -         # Go to previous directory",
+    },
+});
 
-fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
+pub const builtin = builtins.fromSpec(spec, run);
+
+fn run(state: *builtins.State, r: spec.Result) u8 {
     // Determine target directory
-    const target = if (cmd.argv.len < 2) state.home orelse {
+    const target = if (r.dir.len == 0) state.home orelse {
         builtins.io.writeStderr("cd: HOME not set\n");
         return 1;
-    } else if (std.mem.eql(u8, cmd.argv[1], "-")) state.prev_cwd orelse {
+    } else if (std.mem.eql(u8, r.dir, "-")) state.prev_cwd orelse {
         builtins.io.writeStderr("cd: OLDPWD not set\n");
         return 1;
-    } else cmd.argv[1];
+    } else r.dir;
 
     state.chdir(target) catch |err| {
         builtins.io.printError("cd: {s}: {}\n", .{ target, err });

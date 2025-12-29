@@ -78,7 +78,14 @@ pub fn tryExpandSimpleBuiltin(allocator: std.mem.Allocator, state: *State, stmt:
         freeExpandedSlice(allocator, expanded);
         return null;
     }
-    if (!builtins.isBuiltin(expanded[0].argv[0])) {
+    const name = expanded[0].argv[0];
+    if (!builtins.isBuiltin(name)) {
+        freeExpandedSlice(allocator, expanded);
+        return null;
+    }
+    // eval and source execute arbitrary code that may have redirects/pipes
+    // They must use fork-based capture to honor those correctly
+    if (std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "source")) {
         freeExpandedSlice(allocator, expanded);
         return null;
     }
@@ -101,56 +108,24 @@ fn freeExpandedSlice(allocator: std.mem.Allocator, cmds: []const ExpandedCmd) vo
 
 /// Capture a builtin's stdout output in-process without forking.
 ///
-/// This is ~100x faster than fork-based capture because it avoids the overhead
-/// of process creation, context switching, and IPC. The tradeoff is that it
-/// only works for builtins (not external commands or pipelines).
+/// This is the fastest capture path - pure in-memory with zero syscalls
+/// and zero heap allocations. Reuses Writer for buffering (no separate impl).
 ///
-/// The implementation redirects stdout to a pipe, runs the builtin, then reads
-/// the captured output. This is safe because builtins run synchronously and
-/// don't spawn child processes.
+/// Only works for builtins (not external commands or pipelines).
 pub fn captureBuiltin(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) !CaptureResult {
-    // Create pipe: builtin writes to write_fd, we read from read_fd
-    const pipe_fds = try std.posix.pipe();
-    const read_fd = pipe_fds[0];
-    const write_fd = pipe_fds[1];
-    errdefer std.posix.close(read_fd);
+    // Use a Writer as the capture buffer - same type builtins use internally
+    var w = io.Writer{};
 
-    // Redirect stdout to the pipe
-    const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
-    defer std.posix.close(saved_stdout);
+    // Enable capture mode, saving previous state for nested captures
+    const prev = io.startCapture(&w);
+    defer io.endCapture(prev);
 
-    try std.posix.dup2(write_fd, std.posix.STDOUT_FILENO);
-    std.posix.close(write_fd);
-
-    // Run the builtin (output goes to pipe)
+    // Run the builtin (output goes to Writer)
     const status = builtins.tryRun(state, cmd) orelse 1;
 
-    // Restore stdout (closes the pipe's write end, allowing read to see EOF)
-    try std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO);
-
-    // Read captured output
-    const output = try readAllFromFd(allocator, read_fd);
-    std.posix.close(read_fd);
-
-    return .{ .output = output, .status = status };
-}
-
-/// Read all data from a file descriptor until EOF, trimming trailing newlines.
-fn readAllFromFd(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]const u8 {
-    var output: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer output.deinit(allocator);
-
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = std.posix.read(fd, &buf) catch break;
-        if (n == 0) break;
-        try output.appendSlice(allocator, buf[0..n]);
-    }
-
-    const trimmed = std.mem.trimRight(u8, output.items, "\n");
-    const result = try allocator.dupe(u8, trimmed);
-    output.deinit(allocator);
-    return result;
+    // Get captured output and trim trailing newlines
+    const trimmed = std.mem.trimRight(u8, w.buf[0..w.pos], "\n");
+    return .{ .output = try allocator.dupe(u8, trimmed), .status = status };
 }
 
 /// Store captured output into a shell variable.

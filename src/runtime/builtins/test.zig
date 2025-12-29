@@ -10,6 +10,8 @@
 //!   test EXPRESSION
 //!   [ EXPRESSION ]
 
+// TODO: Convert to the new args parsing system
+
 const std = @import("std");
 const builtins = @import("../builtins.zig");
 
@@ -277,88 +279,105 @@ fn testExecutable(path: []const u8) u8 {
 // =============================================================================
 // Tests
 // =============================================================================
+//
+// NOTE: Basic operator tests (string equality, numeric comparisons, file tests)
+// are covered by e2e.wave. These unit tests focus on:
+// - Parser edge cases not easily tested via E2E
+// - Error handling and malformed expressions
+// - Logical operators (-a, -o) and parentheses (complex parsing)
 
 const testing = std.testing;
-const test_utils = @import("testing.zig");
 
-test "test: no args returns false" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{"test"});
-    try testing.expectEqual(@as(u8, 1), run(undefined, cmd));
+fn makeCmd(argv: []const []const u8) builtins.ExpandedCmd {
+    return .{ .argv = argv, .env = &.{}, .redirects = &.{} };
 }
 
-test "test: single non-empty string returns true" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{ "test", "hello" });
-    try testing.expectEqual(@as(u8, 0), run(undefined, cmd));
+fn runTestCmd(argv: []const []const u8) u8 {
+    return run(undefined, makeCmd(argv));
 }
 
-test "test: -z empty string returns true" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{ "test", "-z", "" });
-    try testing.expectEqual(@as(u8, 0), run(undefined, cmd));
+fn runBracketCmd(argv: []const []const u8) u8 {
+    return runBracket(undefined, makeCmd(argv));
 }
 
-test "test: -z non-empty returns false" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{ "test", "-z", "hello" });
-    try testing.expectEqual(@as(u8, 1), run(undefined, cmd));
+// -----------------------------------------------------------------------------
+// Test: edge cases and logical operators
+// -----------------------------------------------------------------------------
+
+test "Test: edge cases and negation" {
+    const cases = .{
+        // Edge cases (not covered by E2E)
+        .{ &[_][]const u8{"test"}, @as(u8, 1) }, // no args returns false
+        .{ &[_][]const u8{ "test", "" }, @as(u8, 1) }, // single empty string returns false
+        .{ &[_][]const u8{ "test", "!" }, @as(u8, 0) }, // "!" alone is truthy (non-empty string)
+        // Double negation
+        .{ &[_][]const u8{ "test", "!", "!", "" }, @as(u8, 1) }, // !!empty = false
+        .{ &[_][]const u8{ "test", "!", "!", "hello" }, @as(u8, 0) }, // !!nonempty = true
+    };
+    inline for (cases) |case| {
+        try testing.expectEqual(case[1], runTestCmd(case[0]));
+    }
 }
 
-test "test: -n non-empty returns true" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{ "test", "-n", "hello" });
-    try testing.expectEqual(@as(u8, 0), run(undefined, cmd));
+test "Test: logical operators (-a and -o)" {
+    const cases = .{
+        // -a (and)
+        .{ &[_][]const u8{ "test", "-n", "a", "-a", "-n", "b" }, @as(u8, 0) }, // true AND true
+        .{ &[_][]const u8{ "test", "-z", "a", "-a", "-n", "b" }, @as(u8, 1) }, // false AND true (short-circuit)
+        .{ &[_][]const u8{ "test", "-n", "a", "-a", "-z", "b" }, @as(u8, 1) }, // true AND false
+        // -o (or)
+        .{ &[_][]const u8{ "test", "-n", "a", "-o", "-n", "b" }, @as(u8, 0) }, // true OR true (short-circuit)
+        .{ &[_][]const u8{ "test", "-z", "a", "-o", "-n", "b" }, @as(u8, 0) }, // false OR true
+        .{ &[_][]const u8{ "test", "-z", "a", "-o", "-z", "b" }, @as(u8, 1) }, // false OR false
+    };
+    inline for (cases) |case| {
+        try testing.expectEqual(case[1], runTestCmd(case[0]));
+    }
 }
 
-test "test: string equality" {
-    const cmd1 = test_utils.makeCmd(&[_][]const u8{ "test", "foo", "=", "foo" });
-    try testing.expectEqual(@as(u8, 0), run(undefined, cmd1));
+// -----------------------------------------------------------------------------
+// Test: parentheses (complex parsing)
+// -----------------------------------------------------------------------------
 
-    const cmd2 = test_utils.makeCmd(&[_][]const u8{ "test", "foo", "=", "bar" });
-    try testing.expectEqual(@as(u8, 1), run(undefined, cmd2));
+test "Test: parentheses grouping" {
+    const cases = .{
+        // Simple grouping
+        .{ &[_][]const u8{ "test", "(", "-n", "hello", ")" }, @as(u8, 0) },
+        .{ &[_][]const u8{ "test", "(", "-z", "hello", ")" }, @as(u8, 1) },
+        // With operators inside
+        .{ &[_][]const u8{ "test", "(", "-n", "a", "-a", "-z", "a", ")" }, @as(u8, 1) },
+        .{ &[_][]const u8{ "test", "(", "-n", "a", "-o", "-z", "a", ")" }, @as(u8, 0) },
+        // Nested
+        .{ &[_][]const u8{ "test", "(", "(", "-n", "x", ")", ")" }, @as(u8, 0) },
+    };
+    inline for (cases) |case| {
+        try testing.expectEqual(case[1], runTestCmd(case[0]));
+    }
 }
 
-test "test: string inequality" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{ "test", "foo", "!=", "bar" });
-    try testing.expectEqual(@as(u8, 0), run(undefined, cmd));
+// -----------------------------------------------------------------------------
+// Test: bracket syntax and error cases
+// -----------------------------------------------------------------------------
+
+test "Test: bracket syntax errors" {
+    const cases = .{
+        .{ &[_][]const u8{ "[", "-n", "hello" }, @as(u8, 2) }, // missing closing bracket
+        .{ &[_][]const u8{"["}, @as(u8, 2) }, // missing bracket only
+    };
+    inline for (cases) |case| {
+        try testing.expectEqual(case[1], runBracketCmd(case[0]));
+    }
 }
 
-test "test: numeric equality" {
-    const cmd1 = test_utils.makeCmd(&[_][]const u8{ "test", "42", "-eq", "42" });
-    try testing.expectEqual(@as(u8, 0), run(undefined, cmd1));
-
-    const cmd2 = test_utils.makeCmd(&[_][]const u8{ "test", "42", "-eq", "43" });
-    try testing.expectEqual(@as(u8, 1), run(undefined, cmd2));
-}
-
-test "test: numeric less than" {
-    const cmd1 = test_utils.makeCmd(&[_][]const u8{ "test", "5", "-lt", "10" });
-    try testing.expectEqual(@as(u8, 0), run(undefined, cmd1));
-
-    const cmd2 = test_utils.makeCmd(&[_][]const u8{ "test", "10", "-lt", "5" });
-    try testing.expectEqual(@as(u8, 1), run(undefined, cmd2));
-}
-
-test "test: numeric greater than" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{ "test", "10", "-gt", "5" });
-    try testing.expectEqual(@as(u8, 0), run(undefined, cmd));
-}
-
-test "test: negation" {
-    const cmd1 = test_utils.makeCmd(&[_][]const u8{ "test", "!", "-z", "hello" });
-    try testing.expectEqual(@as(u8, 0), run(undefined, cmd1)); // !false = true
-
-    const cmd2 = test_utils.makeCmd(&[_][]const u8{ "test", "!", "-n", "hello" });
-    try testing.expectEqual(@as(u8, 1), run(undefined, cmd2)); // !true = false
-}
-
-test "[: requires closing bracket" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{ "[", "-n", "hello" });
-    try testing.expectEqual(@as(u8, 2), runBracket(undefined, cmd));
-}
-
-test "[: with closing bracket" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{ "[", "-n", "hello", "]" });
-    try testing.expectEqual(@as(u8, 0), runBracket(undefined, cmd));
-}
-
-test "test: -e on existing file" {
-    const cmd = test_utils.makeCmd(&[_][]const u8{ "test", "-e", "build.zig" });
-    _ = run(undefined, cmd);
+test "Test: error cases" {
+    const cases = .{
+        .{ &[_][]const u8{ "test", "abc", "-eq", "5" }, @as(u8, 2) }, // invalid numeric comparison
+        .{ &[_][]const u8{ "test", "-X", "foo" }, @as(u8, 2) }, // unknown unary operator
+        .{ &[_][]const u8{ "test", "(", "-n", "x" }, @as(u8, 2) }, // missing closing paren
+        .{ &[_][]const u8{ "test", "-n", "x", "-a" }, @as(u8, 2) }, // missing argument after -a
+        .{ &[_][]const u8{ "test", "-z", "x", "-o" }, @as(u8, 2) }, // missing argument after -o
+    };
+    inline for (cases) |case| {
+        try testing.expectEqual(case[1], runTestCmd(case[0]));
+    }
 }

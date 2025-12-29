@@ -21,7 +21,7 @@ pub fn fromHistory(input: []const u8, hist: *const History, cwd: []const u8) ?[]
         if (!std.mem.startsWith(u8, e.command, input)) continue;
 
         const score = history.scoreEntry(&e, cwd, now);
-        if (score > best_score) {
+        if (score >= best_score) {
             best_score = score;
             best = e.command[input.len..];
         }
@@ -36,89 +36,83 @@ pub fn fromHistory(input: []const u8, hist: *const History, cwd: []const u8) ?[]
 
 const testing = std.testing;
 
-test "match: returns suffix for matching prefix" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-    _ = hist.add(.{ .command = "git commit -m 'test'", .cwd = "/", .exit_status = 0 });
+const TestContext = struct {
+    hist: History,
 
-    const suggestion = fromHistory("git co", &hist, "/");
-    try testing.expect(suggestion != null);
-    try testing.expectEqualStrings("mmit -m 'test'", suggestion.?);
+    fn init() TestContext {
+        return .{ .hist = History.init(testing.allocator) };
+    }
+
+    fn deinit(self: *TestContext) void {
+        self.hist.deinit();
+    }
+
+    fn add(self: *TestContext, cmd: []const u8, cwd: []const u8, status: u8) void {
+        _ = self.hist.add(.{ .command = cmd, .cwd = cwd, .exit_status = status });
+    }
+
+    fn suggest(self: *const TestContext, input: []const u8, cwd: []const u8) ?[]const u8 {
+        return fromHistory(input, &self.hist, cwd);
+    }
+};
+
+// -----------------------------------------------------------------------------
+// Matching
+// -----------------------------------------------------------------------------
+
+test "Suggestions: basic matching" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    ctx.add("git commit -m 'test'", "/", 0);
+    try testing.expectEqualStrings("mmit -m 'test'", ctx.suggest("git co", "/").?);
+
+    // Most recent wins when multiple matches
+    ctx.add("echo hello", "/", 0);
+    ctx.add("echo world", "/", 0);
+    try testing.expectEqualStrings(" world", ctx.suggest("echo", "/").?);
 }
 
-test "match: selects most recent when multiple matches" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-    _ = hist.add(.{ .command = "echo hello", .cwd = "/", .exit_status = 0 });
-    _ = hist.add(.{ .command = "echo world", .cwd = "/", .exit_status = 0 });
+test "Suggestions: no match cases" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
 
-    const suggestion = fromHistory("echo", &hist, "/");
-    try testing.expect(suggestion != null);
-    try testing.expectEqualStrings(" world", suggestion.?);
+    ctx.add("echo hello", "/", 0);
+
+    try testing.expect(ctx.suggest("xyz", "/") == null); // no prefix match
+    try testing.expect(ctx.suggest("echo hello", "/") == null); // exact match
+    try testing.expect(ctx.suggest("", "/") == null); // empty input
+
+    var empty = TestContext.init();
+    defer empty.deinit();
+    try testing.expect(empty.suggest("echo", "/") == null); // empty history
 }
 
-test "match: no suggestion when no prefix match" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-    _ = hist.add(.{ .command = "echo hello", .cwd = "/", .exit_status = 0 });
-    try testing.expect(fromHistory("xyz", &hist, "/") == null);
-}
+// -----------------------------------------------------------------------------
+// Ranking
+// -----------------------------------------------------------------------------
 
-test "match: no suggestion for exact match" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-    _ = hist.add(.{ .command = "echo hello", .cwd = "/", .exit_status = 0 });
-    try testing.expect(fromHistory("echo hello", &hist, "/") == null);
-}
+test "Suggestions: ranking preferences" {
+    // Prefers current directory
+    var ctx1 = TestContext.init();
+    defer ctx1.deinit();
+    ctx1.add("make test", "/project", 0);
+    ctx1.add("make build", "/other", 0);
+    try testing.expectEqualStrings(" test", ctx1.suggest("make", "/project").?);
 
-test "empty: no suggestion for empty input" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-    _ = hist.add(.{ .command = "echo hello", .cwd = "/", .exit_status = 0 });
-    try testing.expect(fromHistory("", &hist, "/") == null);
-}
+    // Prefers successful over failed
+    var ctx2 = TestContext.init();
+    defer ctx2.deinit();
+    ctx2.add("make success", "/", 0);
+    ctx2.add("make failed", "/", 1);
+    try testing.expectEqualStrings(" success", ctx2.suggest("make", "/").?);
 
-test "empty: no suggestion from empty history" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-    try testing.expect(fromHistory("echo", &hist, "/") == null);
-}
-
-test "ranking: prefers current directory over other" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-    _ = hist.add(.{ .command = "make test", .cwd = "/project", .exit_status = 0 });
-    _ = hist.add(.{ .command = "make build", .cwd = "/other", .exit_status = 0 });
-
-    const suggestion = fromHistory("make", &hist, "/project");
-    try testing.expect(suggestion != null);
-    try testing.expectEqualStrings(" test", suggestion.?);
-}
-
-test "ranking: prefers successful over failed" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-    _ = hist.add(.{ .command = "make success", .cwd = "/", .exit_status = 0 });
-    _ = hist.add(.{ .command = "make failed", .cwd = "/", .exit_status = 1 });
-
-    const suggestion = fromHistory("make", &hist, "/");
-    try testing.expect(suggestion != null);
-    try testing.expectEqualStrings(" success", suggestion.?);
-}
-
-test "ranking: prefers frequent over rare" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-
-    // Add rare command once
-    _ = hist.add(.{ .command = "npm run rare", .cwd = "/", .exit_status = 0 });
-
-    // Add frequent command multiple times to build frequency
-    _ = hist.add(.{ .command = "npm run frequent", .cwd = "/", .exit_status = 0 });
-    _ = hist.add(.{ .command = "npm run frequent", .cwd = "/", .exit_status = 0 });
-    _ = hist.add(.{ .command = "npm run frequent", .cwd = "/", .exit_status = 0 });
-
-    const suggestion = fromHistory("npm run", &hist, "/");
-    try testing.expect(suggestion != null);
-    try testing.expectEqualStrings(" frequent", suggestion.?);
+    // Prefers frequent over rare
+    var ctx3 = TestContext.init();
+    defer ctx3.deinit();
+    ctx3.add("npm run rare", "/", 0);
+    ctx3.add("npm run frequent", "/", 0);
+    ctx3.add("npm run frequent", "/", 0);
+    ctx3.add("npm run frequent", "/", 0);
+    try testing.expectEqualStrings(" frequent", ctx3.suggest("npm run", "/").?);
 }
