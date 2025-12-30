@@ -304,6 +304,9 @@ test_exit_code "Return 0" "fun f; return 0; end; f" "0"
 test_exit_code "Return 99" "fun f; return 99; end; f" "99"
 test_exit_code "Return in else if" "fun check; if test a = a; return 5; else if test b = b; return 10; end; end; check" "5"
 
+# Recursion limit
+test_exit_code "Recursion limit" "fun r; r; end; r" "1"
+
 # ============================================================================
 # Aliases
 # ============================================================================

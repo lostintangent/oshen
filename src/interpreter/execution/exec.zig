@@ -28,6 +28,10 @@ const ast = @import("../../language/ast.zig");
 const ExpandedCmd = expansion_types.ExpandedCmd;
 const posix = jobs.posix;
 
+// Recursion limit to prevent stack overflow / OOM
+const MAX_RECURSION_DEPTH: u32 = 40;
+var recursion_depth: u32 = 0;
+
 // =============================================================================
 // Re-exports
 // =============================================================================
@@ -571,6 +575,14 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
 
     const name = cmd.argv[0];
     const func = state.getFunction(name) orelse return null;
+
+    // Check recursion limit
+    if (recursion_depth >= MAX_RECURSION_DEPTH) {
+        io.printError("{s}: maximum recursion depth exceeded ({d})\n", .{ name, MAX_RECURSION_DEPTH });
+        return 1;
+    }
+    recursion_depth += 1;
+    defer recursion_depth -= 1;
 
     // Remember how many deferred commands exist before this function
     const defer_count_before = state.deferred.items.len;
