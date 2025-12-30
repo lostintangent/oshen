@@ -186,8 +186,24 @@ fn stringSet(comptime strings: []const []const u8) std.StaticStringMap(void) {
 }
 
 const keywords = stringSet(&.{ "and", "or", "fun", "end", "if", "else", "for", "each", "in", "while", "break", "continue", "return", "defer", "exit" });
+
+/// Returns true if the word is any shell keyword.
 pub fn isKeyword(word: []const u8) bool {
     return keywords.has(word);
+}
+
+// Keyword subsets for parser use
+const logical_keywords = stringSet(&.{ "and", "or" });
+const block_keywords = stringSet(&.{ "if", "for", "each", "while", "fun" });
+
+/// Returns true if the word is a logical keyword (and, or).
+pub fn isLogicalKeyword(word: []const u8) bool {
+    return logical_keywords.has(word);
+}
+
+/// Returns true if the word starts a block (if, for, each, while, fun).
+pub fn isBlockKeyword(word: []const u8) bool {
+    return block_keywords.has(word);
 }
 
 /// Returns true if `c` is a valid identifier character (alphanumeric or underscore).

@@ -20,26 +20,17 @@ const lexer_mod = @import("../../language/lexer.zig");
 const expansion_statement = @import("../expansion/statement.zig");
 
 // Delegate to specialized modules
-const jobs = @import("jobs.zig");
+const signals = @import("signals.zig");
 const pipeline = @import("pipeline.zig");
 const capture_mod = @import("capture.zig");
 
 const ast = @import("../../language/ast.zig");
 const ExpandedCmd = expansion_types.ExpandedCmd;
-const posix = jobs.posix;
+const posix = signals.posix;
 
 // Recursion limit to prevent stack overflow / OOM
 const MAX_RECURSION_DEPTH: u32 = 40;
 var recursion_depth: u32 = 0;
-
-// =============================================================================
-// Re-exports
-// =============================================================================
-
-pub const initJobControl = jobs.initJobControl;
-pub const initSignals = jobs.initSignals;
-pub const continueJobForeground = jobs.continueJobForeground;
-pub const continueJobBackground = jobs.continueJobBackground;
 
 // =============================================================================
 // Public API
@@ -522,7 +513,7 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
         _ = posix.setpgid(0, 0);
 
         // Reset signal handlers to default in child
-        jobs.resetSignalsToDefault();
+        signals.resetToDefault();
 
         // Execute the statement chains
         var last_status: u8 = 0;

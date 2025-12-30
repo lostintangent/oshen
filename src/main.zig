@@ -26,7 +26,7 @@ const State = @import("runtime/state.zig").State;
 const repl = @import("repl/repl.zig");
 const io = @import("terminal/io.zig");
 const interpreter = @import("interpreter/interpreter.zig");
-const exec = @import("interpreter/execution/exec.zig");
+const signals = @import("interpreter/execution/signals.zig");
 
 /// Config file path relative to home directory
 const CONFIG_FILE = ".oshen_floor";
@@ -63,9 +63,9 @@ pub fn main() !void {
 
     switch (opts.mode) {
         .interactive => {
-            // Set up job control for interactive mode
+            // Set up signal handling for interactive mode
             state.interactive = true;
-            exec.initJobControl(&state);
+            signals.initInteractive(&state);
 
             // Load config file
             loadConfig(allocator, &state);

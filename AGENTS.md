@@ -47,6 +47,8 @@ Optionally, if your change...
    1. Compile a fast release build of Oshen
    2. Run the `scripts/benchmark.wave` file before and after your changes (via git stashing) and ensure it didn't slow down
 2. Introduced or changed a user-facing behavior, then make sure to update the `README.md`
-3. Made a meaningful change/addition to the application's archtecture, then consider whether you should update `docs/ARCHITECTURE.md`.
+3. Made a meaningful change/addition to the system, then review `docs/DESIGN.md` and:
+   - Confirm your change adheres to the design philosophy (commands all the way down, high-performance, modern DX, no surprises)
+   - Update the doc with new details, decisions, or tradeoffs if your change introduces architectural patterns worth documenting
 
 If any of this is missed, then the code won't be ready for review.

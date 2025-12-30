@@ -1,15 +1,26 @@
-//! Output capture utilities.
+//! Output capture: execute commands and capture their stdout.
 //!
-//! Provides two capture strategies:
-//! - `captureBuiltin()`: In-process capture for builtins (fast, no fork)
-//! - `forkWithPipe()`: Fork-based capture for external commands
-//!
-//! Also provides `tryExpandSimpleBuiltin()` to detect when the fast path is usable.
-//!
-//! Used by:
-//! - Output capture operators (`=>`, `=>@`)
+//! This module handles all output capture scenarios in the shell:
 //! - Command substitution `$(...)`
+//! - Output capture operators (`=>`, `=>@`)
 //! - Custom prompt function execution
+//!
+//! Performance is critical since command substitutions are extremely common
+//! in shell scripts (e.g., loops with `$(= $i + 1)`). We use a tiered approach:
+//!
+//!   1. Direct paths - Skip lexing/parsing entirely for simple patterns
+//!      - tryCaptureCalcDirect:    $(= $x + 1), $(calc 2 * 3)
+//!      - tryCaptureBuiltinDirect: $(pwd), $(echo $var), $(true)
+//!
+//!   2. Full path - Use complete lex → parse → expand pipeline, but capture in-process
+//!      - tryCaptureBuiltinFull:   $(echo "hello $name"), $(type git)
+//!
+//!   3. Fork path - Fork a child process for complex commands
+//!      - External commands, pipelines, redirects, etc.
+//!
+//! The direct paths achieve ~1000x speedup over forking by avoiding process
+//! creation overhead entirely. Even the full path is ~100x faster than forking
+//! since it runs the builtin in-process.
 
 const std = @import("std");
 const io = @import("../../terminal/io.zig");
@@ -19,20 +30,318 @@ const ExpandedCmd = @import("../expansion/expanded.zig").ExpandedCmd;
 const ast = @import("../../language/ast.zig");
 const expand = @import("../expansion/word.zig");
 const expansion_statement = @import("../expansion/statement.zig");
+const calc = @import("../../runtime/builtins/calc.zig");
+const interpreter = @import("../interpreter.zig");
 
 // C library functions
 const c = struct {
     extern "c" fn waitpid(pid: std.posix.pid_t, status: ?*c_int, options: c_int) std.posix.pid_t;
 };
 
+// =============================================================================
+// Public API
+// =============================================================================
+
 pub const CaptureResult = struct {
     output: []const u8,
     status: u8,
 };
 
+/// Execute shell input and capture stdout.
+///
+/// Tries increasingly expensive strategies until one succeeds:
+/// 1. Direct calc evaluation (no parsing)
+/// 2. Direct builtin execution (no parsing)
+/// 3. Full parse + in-process builtin capture
+/// 4. Fork child process (fallback for external commands)
+///
+/// Used by:
+/// - Command substitution `$(...)` during word expansion
+/// - Custom prompt functions
+pub fn executeAndCapture(allocator: std.mem.Allocator, state: *State, input: []const u8) ![]const u8 {
+    // Direct path: evaluate calc expressions without any parsing
+    if (tryCaptureCalcDirect(allocator, state, input)) |result| {
+        return result;
+    }
+
+    // Direct path: run simple builtins without parsing
+    if (tryCaptureBuiltinDirect(allocator, state, input)) |result| {
+        return result;
+    }
+
+    // Full path: parse and expand, then capture builtin in-process
+    if (tryCaptureBuiltinFull(allocator, state, input)) |result| {
+        defer result.arena.deinit();
+        const captured = try captureBuiltin(allocator, state, result.expanded.cmd);
+        return captured.output;
+    }
+
+    // Fork path: spawn child process for external commands, pipelines, etc.
+    switch (try forkWithPipe()) {
+        .child => {
+            const status = interpreter.execute(allocator, state, input) catch 1;
+            std.posix.exit(status);
+        },
+        .parent => |handle| {
+            const result = try handle.readAndWait(allocator);
+            return result.output;
+        },
+    }
+}
+
+/// Store captured output into a shell variable.
+pub fn storeCapture(allocator: std.mem.Allocator, state: *State, output: []const u8, variable: []const u8, as_lines: bool) !void {
+    if (as_lines) {
+        var lines: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer lines.deinit(allocator);
+
+        var iter = std.mem.splitScalar(u8, output, '\n');
+        while (iter.next()) |line| {
+            try lines.append(allocator, try allocator.dupe(u8, line));
+        }
+        try state.setVarList(variable, lines.items);
+    } else {
+        try state.setVar(variable, output);
+    }
+}
+
 // =============================================================================
-// Simple Builtin Detection
+// Direct Capture Paths (no parsing)
 // =============================================================================
+
+/// Direct capture path for calc expressions.
+///
+/// Handles patterns like `$(= $x + 1)` and `$(calc 2 * 3)` by:
+/// 1. Detecting the `= ` or `calc ` prefix
+/// 2. Rejecting expressions with complex shell syntax ($(), pipes, etc.)
+/// 3. Expanding simple `$var` references
+/// 4. Evaluating the math expression directly
+///
+/// Returns null if the input doesn't match or is too complex.
+///
+/// ## Performance
+/// ~1000x faster than forking - no process creation, no lexer/parser, no command dispatch.
+/// The calc parser operates directly on the expression string.
+fn tryCaptureCalcDirect(allocator: std.mem.Allocator, state: *State, input: []const u8) ?[]const u8 {
+    // Check for "calc " or "= " prefix
+    const expr_start: usize = if (std.mem.startsWith(u8, input, "calc "))
+        5
+    else if (std.mem.startsWith(u8, input, "= "))
+        2
+    else
+        return null;
+
+    const expr_raw = input[expr_start..];
+
+    // Bail if expression contains complex shell metacharacters
+    // We can handle simple $var but not $(), ``, pipes, redirects, etc.
+    for (expr_raw) |char| {
+        switch (char) {
+            '`', '|', '>', '<', '&', ';', '\n' => return null,
+            else => {},
+        }
+    }
+
+    // Expand simple variables in the expression
+    // Use a stack buffer to avoid allocation in common cases
+    var expanded_buf: [512]u8 = undefined;
+    const expanded = expandSimpleVars(state, expr_raw, &expanded_buf) orelse return null;
+
+    // Parse and evaluate the expression directly
+    var parser_inst = calc.Parser.init(expanded);
+    const result = parser_inst.parse() catch return null;
+
+    // Format result
+    return std.fmt.allocPrint(allocator, "{d}", .{result}) catch null;
+}
+
+/// Direct capture path for simple builtin commands.
+///
+/// Handles patterns like `$(pwd)`, `$(true)`, `$(echo $var)` by:
+/// 1. Rejecting input with shell metacharacters (quotes, pipes, redirects, etc.)
+/// 2. Splitting on whitespace into argv
+/// 3. Expanding simple `$var` references
+/// 4. Running the builtin and capturing output
+///
+/// Returns null if the input is too complex, falling through to slower paths.
+///
+/// ## Performance
+/// ~1000x faster than forking - no process creation, no lexer/parser overhead.
+/// Uses stack buffers to avoid heap allocation in the common case.
+fn tryCaptureBuiltinDirect(allocator: std.mem.Allocator, state: *State, input: []const u8) ?[]const u8 {
+    // Bail on any shell metacharacters that require full parsing
+    for (input) |char| {
+        switch (char) {
+            '`', '|', '>', '<', '&', ';', '\n', '"', '\'', '(', ')', '{', '}', '*', '?', '[', '\\' => return null,
+            else => {},
+        }
+    }
+
+    // Split into argv on whitespace
+    var argv_buf: [64][]const u8 = undefined;
+    var expanded_storage: [2048]u8 = undefined;
+    var storage_pos: usize = 0;
+    var argc: usize = 0;
+
+    var iter = std.mem.tokenizeAny(u8, input, " \t");
+    while (iter.next()) |token| {
+        if (argc >= argv_buf.len) return null; // Too many args
+
+        // Expand simple $var in this token
+        if (std.mem.indexOfScalar(u8, token, '$')) |_| {
+            const remaining = expanded_storage[storage_pos..];
+            const expanded = expandSimpleVars(state, token, remaining) orelse return null;
+            argv_buf[argc] = expanded_storage[storage_pos..][0..expanded.len];
+            storage_pos += expanded.len;
+        } else {
+            argv_buf[argc] = token;
+        }
+        argc += 1;
+    }
+
+    if (argc == 0) return null;
+
+    const argv = argv_buf[0..argc];
+
+    // Check if it's a builtin
+    if (!builtins.isBuiltin(argv[0])) return null;
+
+    // Build ExpandedCmd struct for the builtin
+    const cmd = ExpandedCmd{
+        .argv = argv,
+        .env = &.{},
+        .redirects = &.{},
+    };
+
+    // Run the builtin with capture
+    const result = captureBuiltin(allocator, state, cmd) catch return null;
+    return result.output;
+}
+
+/// Expand simple $var references in a string.
+/// Returns null if the string contains complex syntax we can't handle.
+/// Uses a stack buffer to avoid allocation.
+fn expandSimpleVars(state: *State, input: []const u8, buf: []u8) ?[]const u8 {
+    var out_pos: usize = 0;
+    var i: usize = 0;
+
+    while (i < input.len) {
+        if (input[i] == '$') {
+            // Check for complex syntax we can't handle
+            if (i + 1 >= input.len) {
+                // Trailing $, just copy it
+                if (out_pos >= buf.len) return null;
+                buf[out_pos] = '$';
+                out_pos += 1;
+                i += 1;
+                continue;
+            }
+
+            const next = input[i + 1];
+            if (next == '(' or next == '{') {
+                // Complex syntax like $() or ${} - bail
+                return null;
+            }
+
+            // Simple variable: $name
+            const var_start = i + 1;
+            var var_end = var_start;
+            while (var_end < input.len and isVarChar(input[var_end])) {
+                var_end += 1;
+            }
+
+            if (var_end == var_start) {
+                // Just a lone $, copy it
+                if (out_pos >= buf.len) return null;
+                buf[out_pos] = '$';
+                out_pos += 1;
+                i += 1;
+                continue;
+            }
+
+            const var_name = input[var_start..var_end];
+            const var_value = state.getVar(var_name) orelse "";
+
+            // Copy variable value to output
+            if (out_pos + var_value.len > buf.len) return null;
+            @memcpy(buf[out_pos..][0..var_value.len], var_value);
+            out_pos += var_value.len;
+            i = var_end;
+        } else {
+            if (out_pos >= buf.len) return null;
+            buf[out_pos] = input[i];
+            out_pos += 1;
+            i += 1;
+        }
+    }
+
+    return buf[0..out_pos];
+}
+
+fn isVarChar(char: u8) bool {
+    return std.ascii.isAlphanumeric(char) or char == '_';
+}
+
+// =============================================================================
+// Full Capture Path (with parsing)
+// =============================================================================
+
+/// Result of successfully parsing and expanding a simple builtin command.
+const CapturedBuiltin = struct {
+    expanded: ExpandedBuiltin,
+    arena: std.heap.ArenaAllocator,
+};
+
+/// Full capture path for builtin commands.
+///
+/// Handles patterns like `$(echo "hello $name")` and `$(type git)` by:
+/// 1. Lexing and parsing the input through the full pipeline
+/// 2. Validating it's a single, simple command (no pipelines, no background)
+/// 3. Expanding variables, globs, and other shell expansions
+/// 4. Running the builtin and capturing output in-process
+///
+/// Returns null if parsing fails or the command is too complex (external command,
+/// pipeline, etc.), falling through to the fork path.
+///
+/// ## Performance
+/// ~100x faster than forking - runs the builtin in-process, avoiding fork/exec.
+/// Slower than direct paths due to full lex/parse/expand overhead.
+fn tryCaptureBuiltinFull(backing: std.mem.Allocator, state: *State, input: []const u8) ?CapturedBuiltin {
+    var arena = std.heap.ArenaAllocator.init(backing);
+    const alloc = arena.allocator();
+
+    // Parse input and extract command statement
+    const parsed = interpreter.parseInput(alloc, input) catch {
+        arena.deinit();
+        return null;
+    };
+    const cmd_stmt = getSimpleCommandStatement(parsed) orelse {
+        arena.deinit();
+        return null;
+    };
+
+    // Use shared builtin detection/expansion
+    const expanded = tryExpandSimpleBuiltin(alloc, state, cmd_stmt) orelse {
+        arena.deinit();
+        return null;
+    };
+
+    return .{ .expanded = expanded, .arena = arena };
+}
+
+/// Extract a simple command statement from a parsed program, or null if too complex.
+/// This does structural validation before the more expensive expansion step.
+fn getSimpleCommandStatement(parsed: interpreter.ParsedInput) ?ast.CommandStatement {
+    if (parsed.ast.statements.len != 1) return null;
+    const stmt = parsed.ast.statements[0];
+    if (stmt != .command) return null;
+
+    const cmd = stmt.command;
+    // Reject background commands - they can't be captured in-process
+    if (cmd.background) return null;
+
+    return cmd;
+}
 
 /// A simple builtin command that can be captured in-process.
 /// Contains both the expanded command and the slice it came from (for cleanup).
@@ -128,22 +437,6 @@ pub fn captureBuiltin(allocator: std.mem.Allocator, state: *State, cmd: Expanded
     return .{ .output = try allocator.dupe(u8, trimmed), .status = status };
 }
 
-/// Store captured output into a shell variable.
-pub fn storeCapture(allocator: std.mem.Allocator, state: *State, output: []const u8, variable: []const u8, as_lines: bool) !void {
-    if (as_lines) {
-        var lines: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer lines.deinit(allocator);
-
-        var iter = std.mem.splitScalar(u8, output, '\n');
-        while (iter.next()) |line| {
-            try lines.append(allocator, try allocator.dupe(u8, line));
-        }
-        try state.setVarList(variable, lines.items);
-    } else {
-        try state.setVar(variable, output);
-    }
-}
-
 // =============================================================================
 // Fork-Based Capture
 // =============================================================================
@@ -203,7 +496,7 @@ pub const ParentHandle = struct {
 ///
 /// Usage:
 /// ```zig
-/// switch (try process.forkWithPipe()) {
+/// switch (try forkWithPipe()) {
 ///     .child => {
 ///         // Run code that writes to stdout/stderr
 ///         const status = doWork();

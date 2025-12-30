@@ -97,7 +97,7 @@ fn errorMessage(err: ParseError) []const u8 {
 //
 // The 'x' operator is a shell-friendly alias for '*' (avoids glob expansion).
 
-const ParseError = error{
+pub const ParseError = error{
     DivisionByZero,
     InvalidNumber,
     UnexpectedEnd,
@@ -105,16 +105,16 @@ const ParseError = error{
     Overflow,
 };
 
-const Parser = struct {
+pub const Parser = struct {
     input: []const u8,
     pos: usize = 0,
 
-    fn init(input: []const u8) Parser {
+    pub fn init(input: []const u8) Parser {
         return .{ .input = input };
     }
 
     /// Parse and evaluate the full expression, ensuring no trailing content.
-    fn parse(self: *Parser) ParseError!i64 {
+    pub fn parse(self: *Parser) ParseError!i64 {
         const result = try self.expr();
         self.skipWhitespace();
         if (self.pos < self.input.len) return error.InvalidNumber;

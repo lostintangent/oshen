@@ -10,7 +10,7 @@ const std = @import("std");
 const builtins = @import("../builtins.zig");
 const tui = @import("../../terminal/tui.zig");
 const ansi = @import("../../terminal/ansi.zig");
-const exec = @import("../../interpreter/execution/jobs.zig");
+const signals = @import("../../interpreter/execution/signals.zig");
 const runtime_jobs = @import("../jobs.zig");
 
 pub const builtin = builtins.Builtin{
@@ -26,7 +26,7 @@ fn run(state: *builtins.State, _: builtins.ExpandedCmd) u8 {
 
     if (state.interactive and stdin_tty and stdout_tty) {
         if (selectJob(state)) |job_id| {
-            return exec.continueJobForeground(state, job_id);
+            return signals.continueJobForeground(state, job_id);
         }
         return 0;
     }

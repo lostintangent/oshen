@@ -1,9 +1,11 @@
-//! Job control: signal handlers, terminal control, and job continuation
+//! Signal handling and job continuation for the shell.
 //!
-//! This module handles interactive job control features:
-//! - Signal handler setup (SIGCHLD, SIGTSTP, etc.)
-//! - Terminal foreground/background control
-//! - Continuing stopped jobs (fg/bg)
+//! This module handles:
+//! - Shell initialization (process group, terminal ownership)
+//! - Signal handler setup (SIGCHLD, SIGINT, SIGTSTP)
+//! - Continuing stopped jobs (fg/bg builtins)
+//!
+//! Signal handling only matters in interactive mode (when connected to a TTY).
 
 const std = @import("std");
 const state_mod = @import("../../runtime/state.zig");
@@ -30,12 +32,15 @@ pub const posix = struct {
 };
 
 // =============================================================================
-// Signal Handler Helpers
+// Child Process Helpers
 // =============================================================================
 
-/// Reset job control signals to default handlers.
-/// Called in child processes before exec to restore normal signal behavior.
-pub fn resetSignalsToDefault() void {
+/// Reset signals to default handlers in child processes.
+///
+/// Called after fork() but before exec() to restore normal signal behavior.
+/// Without this, child processes would inherit the shell's signal handlers
+/// (which ignore SIGTSTP, etc.).
+pub fn resetToDefault() void {
     const default_act = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.DFL },
         .mask = std.posix.sigemptyset(),
@@ -52,24 +57,31 @@ pub fn resetSignalsToDefault() void {
 // Global State
 // =============================================================================
 
-/// Global state pointer for SIGCHLD signal handler.
+/// Global state pointer for signal handlers.
 ///
 /// RATIONALE: POSIX signal handlers have a C ABI constraint that prevents passing
 /// context through the handler signature. This global is the standard pattern for
 /// allowing the signal handler to update shell job state when child processes
-/// terminate or stop. Set once during `initJobControl()` and remains valid for
-/// the shell's lifetime.
+/// terminate or stop. Set once during `init()` and remains valid for the shell's
+/// lifetime.
 ///
 /// SAFETY: Only accessed from signal handler context (single-threaded signal delivery)
-/// and from `initJobControl`. The shell is single-threaded, so no synchronization needed.
+/// and from `init`. The shell is single-threaded, so no synchronization needed.
 var g_state: ?*State = null;
 
 // =============================================================================
 // Public API
 // =============================================================================
 
-/// Initialize job control for interactive shell
-pub fn initJobControl(state: *State) void {
+/// Initialize signal handling for interactive shell mode.
+///
+/// Only called once at shell startup when running interactively. Sets up:
+/// - Shell's process group
+/// - Terminal ownership (via tcsetpgrp)
+/// - Signal handlers (SIGINT, SIGCHLD, SIGTSTP, etc.)
+///
+/// Not needed for non-interactive script execution.
+pub fn initInteractive(state: *State) void {
     g_state = state;
 
     // Check if we're actually connected to a terminal
@@ -96,11 +108,15 @@ pub fn initJobControl(state: *State) void {
     }
 
     // Set up signal handlers
-    initSignals();
+    installHandlers();
 }
 
-/// Initialize signal handlers for job control
-pub fn initSignals() void {
+// =============================================================================
+// Signal Handlers
+// =============================================================================
+
+/// Install signal handlers for interactive shell operation.
+fn installHandlers() void {
     // Ignore job control signals in the shell itself
     const ignore_act = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.IGN },
@@ -157,31 +173,13 @@ fn sigintHandler(_: c_int) callconv(.c) void {
 }
 
 // =============================================================================
-// Wait Helpers
+// Job Continuation (fg/bg builtins)
 // =============================================================================
 
-/// Wait for child, also detecting stop signals
-pub fn waitForChildWithStop(pid: std.posix.pid_t) u8 {
-    var status: u32 = 0;
-    _ = posix.waitpid(pid, &status, posix.WUNTRACED);
-
-    if (std.posix.W.IFEXITED(status)) {
-        return std.posix.W.EXITSTATUS(status);
-    } else if (std.posix.W.IFSIGNALED(status)) {
-        return 128 + @as(u8, @intCast(std.posix.W.TERMSIG(status)));
-    } else if (std.posix.W.IFSTOPPED(status)) {
-        // Process was stopped (Ctrl-Z)
-        return 128 + @as(u8, @intCast(std.posix.W.STOPSIG(status)));
-    }
-
-    return 1;
-}
-
-// =============================================================================
-// Job Continuation
-// =============================================================================
-
-/// Continue a stopped job in foreground
+/// Continue a stopped job in the foreground.
+///
+/// Used by the `fg` builtin. Gives terminal control to the job,
+/// sends SIGCONT, and waits for the job to complete or stop again.
 pub fn continueJobForeground(state: *State, job_id: u16) u8 {
     const job = state.jobs.get(job_id) orelse {
         io.printError("oshen: fg: no such job: %{d}\n", .{job_id});
@@ -202,7 +200,7 @@ pub fn continueJobForeground(state: *State, job_id: u16) u8 {
     // Wait for job to complete or stop
     var last_status: u8 = 0;
     for (job.pids) |pid| {
-        last_status = waitForChildWithStop(pid);
+        last_status = waitForeground(pid);
     }
 
     // Take back terminal
@@ -223,7 +221,10 @@ pub fn continueJobForeground(state: *State, job_id: u16) u8 {
     return last_status;
 }
 
-/// Continue a stopped job in background
+/// Continue a stopped job in the background.
+///
+/// Used by the `bg` builtin. Sends SIGCONT without giving terminal control,
+/// allowing the job to run in the background.
 pub fn continueJobBackground(state: *State, job_id: u16) u8 {
     const job = state.jobs.get(job_id) orelse {
         io.printError("oshen: bg: no such job: %{d}\n", .{job_id});
@@ -237,4 +238,33 @@ pub fn continueJobBackground(state: *State, job_id: u16) u8 {
     _ = posix.kill(-job.pgid, std.posix.SIG.CONT);
 
     return 0;
+}
+
+// =============================================================================
+// Wait Helpers
+// =============================================================================
+
+/// Wait for a foreground process to exit or stop.
+///
+/// Blocks until the process exits normally, is killed by a signal, or is
+/// stopped (Ctrl-Z). This is used for foreground pipeline execution.
+///
+/// Returns exit status:
+/// - Normal exit: the exit code (0-255)
+/// - Killed by signal: 128 + signal number
+/// - Stopped (Ctrl-Z): 128 + stop signal number
+pub fn waitForeground(pid: std.posix.pid_t) u8 {
+    var status: u32 = 0;
+    _ = posix.waitpid(pid, &status, posix.WUNTRACED);
+
+    if (std.posix.W.IFEXITED(status)) {
+        return std.posix.W.EXITSTATUS(status);
+    } else if (std.posix.W.IFSIGNALED(status)) {
+        return 128 + @as(u8, @intCast(std.posix.W.TERMSIG(status)));
+    } else if (std.posix.W.IFSTOPPED(status)) {
+        // Process was stopped (Ctrl-Z)
+        return 128 + @as(u8, @intCast(std.posix.W.STOPSIG(status)));
+    }
+
+    return 1;
 }

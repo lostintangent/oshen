@@ -116,27 +116,23 @@ pub const Lexer = struct {
     }
 
     /// Checks if an operator starts at the current position. Returns the operator or null.
-    /// Operators are checked longest-first to ensure correct matching (e.g., "2>&1" before "2>").
+    /// Dispatches on first character, then checks longer matches first within each group.
     fn peekOperator(self: *const Lexer) ?Operator {
-        // 4-character operators
-        if (self.matchesStr("2>&1")) return .redirect_stderr_to_stdout;
-        // 3-character operators
-        if (self.matchesStr("=>@")) return .capture_lines;
-        if (self.matchesStr("2>>")) return .redirect_stderr_append;
-        // 2-character operators
-        if (self.matchesStr("&>")) return .redirect_both;
-        if (self.matchesStr("|>")) return .pipe_arrow;
-        if (self.matchesStr("&&")) return .@"and";
-        if (self.matchesStr("||")) return .@"or";
-        if (self.matchesStr("=>")) return .capture;
-        if (self.matchesStr("2>")) return .redirect_stderr;
-        if (self.matchesStr(">>")) return .redirect_stdout_append;
-        // 1-character operators
-        if (self.matchesStr("|")) return .pipe;
-        if (self.matchesStr("&")) return .background;
-        if (self.matchesStr("<")) return .redirect_stdin;
-        if (self.matchesStr(">")) return .redirect_stdout;
-        return null;
+        const c = self.peek() orelse return null;
+        return switch (c) {
+            '|' => if (self.matchesStr("|>")) .pipe_arrow else if (self.matchesStr("||")) .@"or" else .pipe,
+            '&' => if (self.matchesStr("&>")) .redirect_both else if (self.matchesStr("&&")) .@"and" else .background,
+            '>' => if (self.matchesStr(">>")) .redirect_stdout_append else .redirect_stdout,
+            '<' => .redirect_stdin,
+            '=' => if (self.matchesStr("=>@")) .capture_lines else if (self.matchesStr("=>")) .capture else null,
+            '2' => blk: {
+                if (self.matchesStr("2>&1")) break :blk .redirect_stderr_to_stdout;
+                if (self.matchesStr("2>>")) break :blk .redirect_stderr_append;
+                if (self.matchesStr("2>")) break :blk .redirect_stderr;
+                break :blk null;
+            },
+            else => null,
+        };
     }
 
     /// Reads an operator token if present. Returns true if an operator was read.
@@ -170,30 +166,14 @@ pub const Lexer = struct {
             try buf.append(self.allocator, '\\');
             return;
         };
+        self.advance();
 
         switch (next) {
-            '"', '\\' => {
-                try buf.append(self.allocator, next);
-                self.advance();
-            },
-            'n' => {
-                try buf.append(self.allocator, '\n');
-                self.advance();
-            },
-            't' => {
-                try buf.append(self.allocator, '\t');
-                self.advance();
-            },
-            '$' => {
-                // Preserve escape so expansion treats `$` literally
-                try buf.appendSlice(self.allocator, "\\$");
-                self.advance();
-            },
-            else => {
-                // Unknown escape: preserve both characters
-                try buf.appendSlice(self.allocator, &.{ '\\', next });
-                self.advance();
-            },
+            '"', '\\' => try buf.append(self.allocator, next),
+            'n' => try buf.append(self.allocator, '\n'),
+            't' => try buf.append(self.allocator, '\t'),
+            '$' => try buf.appendSlice(self.allocator, "\\$"), // Preserve for expander
+            else => try buf.appendSlice(self.allocator, &.{ '\\', next }), // Unknown: preserve both
         }
     }
 
@@ -204,15 +184,13 @@ pub const Lexer = struct {
             try buf.append(self.allocator, '\\');
             return;
         };
+        self.advance();
 
         if (next == '$') {
-            // Preserve escape so expansion treats `$` literally
-            try buf.appendSlice(self.allocator, "\\$");
+            try buf.appendSlice(self.allocator, "\\$"); // Preserve for expander
         } else {
-            // Other escapes: just append the escaped character
-            try buf.append(self.allocator, next);
+            try buf.append(self.allocator, next); // Just the escaped character
         }
-        self.advance();
     }
 
     // =========================================================================

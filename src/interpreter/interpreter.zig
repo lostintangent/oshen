@@ -7,6 +7,7 @@
 //! The pipeline is split into composable functions to support different use cases:
 //!
 //! - `execute()`: One-shot execution for REPL input, scripts, and command substitution
+//! - `executeAndCapture()`: Execute and capture stdout (for `$(...)` and prompts)
 //! - `parseInput()` + `executeAst()`: Separated parsing for loop optimization (parse once, execute many)
 //! - `executeFile()`: Convenience wrapper for sourcing script files
 //!
@@ -18,14 +19,22 @@
 
 const std = @import("std");
 const State = @import("../runtime/state.zig").State;
-const exec = @import("execution/exec.zig");
+const statement = @import("execution/statement.zig");
+const capture = @import("execution/capture.zig");
 const lexer = @import("../language/lexer.zig");
 const parser = @import("../language/parser.zig");
 const ast_mod = @import("../language/ast.zig");
 const tokens = @import("../language/tokens.zig");
-const capture = @import("execution/capture.zig");
 const io = @import("../terminal/io.zig");
 const ansi = @import("../terminal/ansi.zig");
+
+// =============================================================================
+// Re-exports
+// =============================================================================
+
+/// Execute shell input and capture stdout.
+/// Re-exported from execution/capture.zig for a unified interpreter API.
+pub const executeAndCapture = capture.executeAndCapture;
 
 /// Maximum file size for script execution (prevents accidental memory exhaustion)
 const MAX_SCRIPT_SIZE: usize = 1024 * 1024; // 1MB
@@ -173,7 +182,7 @@ pub fn executeAstWithArena(arena_alloc: std.mem.Allocator, state: *State, parsed
     var last_status: u8 = 0;
 
     for (parsed.ast.statements) |stmt| {
-        last_status = try exec.executeStatement(arena_alloc, state, stmt, parsed.input);
+        last_status = try statement.executeStatement(arena_alloc, state, stmt, parsed.input);
 
         // Exit signals bubble up to terminate the entire shell
         if (state.should_exit) {
@@ -239,83 +248,4 @@ pub fn executeFile(allocator: std.mem.Allocator, state: *State, path: []const u8
     defer allocator.free(content);
 
     return execute(allocator, state, content);
-}
-
-/// Execute shell input and capture stdout.
-///
-/// For simple builtin commands, captures output in-process (~100x faster).
-/// For external commands, pipelines, or complex cases, forks a child process.
-///
-/// Used by:
-/// - Command substitution `$(...)` during word expansion
-/// - Custom prompt functions
-pub fn executeAndCapture(allocator: std.mem.Allocator, state: *State, input: []const u8) ![]const u8 {
-    // Fast path: try to parse as a simple builtin for in-process capture
-    if (tryParseAndExpandBuiltin(allocator, state, input)) |result| {
-        defer result.arena.deinit();
-        // Note: expanded data is arena-allocated, freed automatically by arena.deinit()
-        const captured = try capture.captureBuiltin(allocator, state, result.expanded.cmd);
-        return captured.output;
-    }
-
-    // Slow path: fork for external commands, pipelines, or complex cases
-    switch (try capture.forkWithPipe()) {
-        .child => {
-            const status = execute(allocator, state, input) catch 1;
-            std.posix.exit(status);
-        },
-        .parent => |handle| {
-            const result = try handle.readAndWait(allocator);
-            return result.output;
-        },
-    }
-}
-
-// =============================================================================
-// Builtin Detection for Capture Optimization
-// =============================================================================
-
-/// Result of successfully parsing and expanding a simple builtin command.
-const ParsedBuiltin = struct {
-    expanded: capture.ExpandedBuiltin,
-    arena: std.heap.ArenaAllocator,
-};
-
-/// Try to parse input as a simple builtin command for in-process capture.
-/// Returns null if parsing fails or the command is too complex.
-fn tryParseAndExpandBuiltin(backing: std.mem.Allocator, state: *State, input: []const u8) ?ParsedBuiltin {
-    var arena = std.heap.ArenaAllocator.init(backing);
-    const alloc = arena.allocator();
-
-    // Parse input and extract command statement
-    const parsed = parseInput(alloc, input) catch {
-        arena.deinit();
-        return null;
-    };
-    const cmd_stmt = getSimpleCommandStatement(parsed) orelse {
-        arena.deinit();
-        return null;
-    };
-
-    // Use shared builtin detection/expansion
-    const expanded = capture.tryExpandSimpleBuiltin(alloc, state, cmd_stmt) orelse {
-        arena.deinit();
-        return null;
-    };
-
-    return .{ .expanded = expanded, .arena = arena };
-}
-
-/// Extract a simple command statement from a parsed program, or null if too complex.
-/// This does structural validation before the more expensive expansion step.
-fn getSimpleCommandStatement(parsed: ParsedInput) ?ast_mod.CommandStatement {
-    if (parsed.ast.statements.len != 1) return null;
-    const stmt = parsed.ast.statements[0];
-    if (stmt != .command) return null;
-
-    const cmd = stmt.command;
-    // Reject background commands - they can't be captured in-process
-    if (cmd.background) return null;
-
-    return cmd;
 }

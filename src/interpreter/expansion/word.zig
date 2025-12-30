@@ -28,7 +28,7 @@
 const std = @import("std");
 const token_types = @import("../../language/tokens.zig");
 const State = @import("../../runtime/state.zig").State;
-const interpreter_mod = @import("../interpreter.zig");
+const interpreter = @import("../interpreter.zig");
 const glob = @import("glob.zig");
 const WordPart = token_types.WordPart;
 
@@ -658,7 +658,7 @@ pub fn runCmdsub(ctx: *ExpandContext, cmd: []const u8) (ExpandError || std.mem.A
         }
     }
 
-    return interpreter_mod.executeAndCapture(ctx.allocator, ctx.state, cmd) catch {
+    return interpreter.executeAndCapture(ctx.allocator, ctx.state, cmd) catch {
         return ExpandError.CommandSubstitutionFailed;
     };
 }

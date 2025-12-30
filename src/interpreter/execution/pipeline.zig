@@ -13,10 +13,10 @@ const State = state_mod.State;
 const builtins = @import("../../runtime/builtins.zig");
 const io = @import("../../terminal/io.zig");
 const redirect = @import("redirect.zig");
-const jobs = @import("jobs.zig");
+const signals = @import("signals.zig");
 
 const ExpandedCmd = expansion_types.ExpandedCmd;
-const posix = jobs.posix;
+const posix = signals.posix;
 
 // =============================================================================
 // Types
@@ -72,10 +72,10 @@ pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, co
                 return status;
             }
         }
-        return try executePipelineWithJobControl(allocator, state, commands, tryRunFunction);
+        return try forkPipeline(allocator, state, commands, tryRunFunction);
     }
 
-    return try executePipelineWithJobControl(allocator, state, commands, tryRunFunction);
+    return try forkPipeline(allocator, state, commands, tryRunFunction);
 }
 
 /// Execute a builtin command with file redirections.
@@ -260,8 +260,16 @@ fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: Expand
 // Pipeline Orchestration
 // =============================================================================
 
-/// Execute a pipeline with full job control (terminal handling, process groups)
-pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State, commands: []const ExpandedCmd, tryRunFunction: FunctionExecutor) !u8 {
+/// Fork and execute a pipeline with process groups and terminal handling.
+///
+/// This is the core process-creation path. It:
+/// 1. Creates pipes between commands
+/// 2. Forks child processes into a shared process group
+/// 3. Gives terminal control to the process group (if foreground)
+/// 4. Waits for all children to complete
+///
+/// Used for external commands and pipelines that can't run in-process.
+pub fn forkPipeline(allocator: std.mem.Allocator, state: *State, commands: []const ExpandedCmd, tryRunFunction: FunctionExecutor) !u8 {
     const n = commands.len;
 
     // Create pipes for multi-command pipeline
@@ -327,7 +335,7 @@ pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State
             _ = posix.setpgid(0, child_pgid);
 
             // Reset signal handlers to default
-            jobs.resetSignalsToDefault();
+            signals.resetToDefault();
 
             setupPipeRedirects(stdin_fd, stdout_fd);
 
@@ -367,7 +375,7 @@ pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State
     // Wait for all children
     var last_status: u8 = 0;
     for (pids.items) |pid| {
-        last_status = jobs.waitForChildWithStop(pid);
+        last_status = signals.waitForeground(pid);
     }
 
     // Take back terminal control

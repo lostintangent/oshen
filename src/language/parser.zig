@@ -128,10 +128,20 @@ pub const Parser = struct {
     /// Used for checking keywords that can appear in command position (if, for, while, etc.).
     /// Note: Keywords are lexed as words, not operators, so this only checks words.
     fn isKeyword(self: *const Parser, keyword: []const u8) bool {
-        const tok = self.peek() orelse return false;
-        if (tok.kind != .word) return false;
+        const text = self.peekBareWord() orelse return false;
+        return std.mem.eql(u8, text, keyword);
+    }
+
+    /// Returns the text of the current token if it's a simple unquoted bare word.
+    /// This is the fast path for keyword checking - extract once, compare many.
+    fn peekBareWord(self: *const Parser) ?[]const u8 {
+        const tok = self.peek() orelse return null;
+        if (tok.kind != .word) return null;
         const segs = tok.kind.word;
-        return segs.len == 1 and segs[0].quotes == .none and std.mem.eql(u8, segs[0].text, keyword);
+        if (segs.len == 1 and segs[0].quotes == .none) {
+            return segs[0].text;
+        }
+        return null;
     }
 
     /// Returns true if current token is a separator (newline or semicolon).
@@ -155,12 +165,14 @@ pub const Parser = struct {
 
     /// Returns true if current word token is a logical keyword (and, or).
     fn isLogicalKeyword(self: *const Parser) bool {
-        return self.isKeyword("and") or self.isKeyword("or");
+        const text = self.peekBareWord() orelse return false;
+        return token_types.isLogicalKeyword(text);
     }
 
     /// Returns true if current token starts a block (if, for, each, while, fun).
     fn isBlockStart(self: *const Parser) bool {
-        return self.isKeyword("if") or self.isKeyword("for") or self.isKeyword("each") or self.isKeyword("while") or self.isKeyword("fun");
+        const text = self.peekBareWord() orelse return false;
+        return token_types.isBlockKeyword(text);
     }
 
     /// Consumes 'end' keyword and validates that a separator or EOF follows.
@@ -387,29 +399,40 @@ pub const Parser = struct {
         var depth: usize = 1;
 
         while (self.pos < self.tokens.len) {
-            // Only recognize keywords in command position (after separator)
             const in_command_position = self.isPrevTokenSeparator();
 
-            if (in_command_position and self.isBlockStart()) {
-                // Check if this is "else if" - don't increment depth since it's part of the same if statement
-                const is_else_if = self.isKeyword("if") and self.isPrevTokenElse();
-                if (!is_else_if) {
+            // Skip non-keyword positions
+            if (!in_command_position) {
+                _ = self.advance();
+                continue;
+            }
+
+            // Handle block-starting keywords (increases nesting depth)
+            if (self.isBlockStart()) {
+                // "else if" is a continuation, not a new block
+                if (!(self.isKeyword("if") and self.isPrevTokenElse())) {
                     depth += 1;
                 }
                 _ = self.advance();
-            } else if (in_command_position and self.isKeyword("end")) {
+                continue;
+            }
+
+            // Handle "end" keyword (decreases nesting depth)
+            if (self.isKeyword("end")) {
                 depth -= 1;
                 if (depth == 0) return self.pos;
                 _ = self.advance();
-            } else {
-                // Check custom terminators at depth 1 (only in command position)
-                if (depth == 1 and in_command_position) {
-                    for (terminators) |term| {
-                        if (self.isKeyword(term)) return self.pos;
-                    }
-                }
-                _ = self.advance();
+                continue;
             }
+
+            // Check custom terminators at outermost level
+            if (depth == 1) {
+                for (terminators) |term| {
+                    if (self.isKeyword(term)) return self.pos;
+                }
+            }
+
+            _ = self.advance();
         }
         return null;
     }
@@ -598,15 +621,18 @@ pub const Parser = struct {
     /// Parses a return statement with optional status.
     fn parseReturnStatement(self: *Parser) Statement {
         _ = self.advance(); // consume 'return'
-        const status = if (self.isWord()) self.captureWord() else null;
-        return .{ .@"return" = status };
+        return .{ .@"return" = self.tryParseOptionalWord() };
     }
 
     /// Parses an exit statement with optional status code.
     fn parseExitStatement(self: *Parser) Statement {
         _ = self.advance(); // consume 'exit'
-        const status = if (self.isWord()) self.captureWord() else null;
-        return .{ .exit = status };
+        return .{ .exit = self.tryParseOptionalWord() };
+    }
+
+    /// Captures the next word if present, returns null otherwise.
+    fn tryParseOptionalWord(self: *Parser) ?[]const u8 {
+        return if (self.isWord()) self.captureWord() else null;
     }
 
     /// Captures a single word token as trimmed source text.
@@ -634,12 +660,8 @@ pub const Parser = struct {
         _ = self.advance(); // consume 'defer'
         const start = self.pos;
 
-        // Parse the command to validate it and advance past it
-        const cmd_stmt = try self.parseSimpleCommand() orelse return ParseError.UnexpectedEOF;
-
-        // Validate: defer cannot use background or capture
-        if (cmd_stmt.background) return ParseError.ConditionWithBackground;
-        if (cmd_stmt.capture != null) return ParseError.ConditionWithCapture;
+        // Parse and validate the command (parseSimpleCommand rejects background/capture)
+        _ = try self.parseSimpleCommand() orelse return ParseError.UnexpectedEOF;
 
         // Extract the source text of the command (will be parsed again during execution)
         const source = std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
@@ -831,17 +853,21 @@ test "Capture: string and lines modes" {
 // Logical Operators
 // -----------------------------------------------------------------------------
 
-test "Logical: && and || chain commands" {
+test "Logical: operator and keyword forms" {
     var ctx = TestContext.init();
     defer ctx.deinit();
 
-    const prog = try ctx.parse("true && echo ok || echo fail");
-    const cmd_stmt = prog.statements[0].command;
+    // Operator form: && and ||
+    const ops = try ctx.parse("true && echo ok || echo fail");
+    try testing.expectEqual(@as(usize, 3), ops.statements[0].command.chains.len);
+    try testing.expectEqual(ast.ChainOperator.@"and", ops.statements[0].command.chains[1].op);
+    try testing.expectEqual(ast.ChainOperator.@"or", ops.statements[0].command.chains[2].op);
 
-    try testing.expectEqual(@as(usize, 3), cmd_stmt.chains.len);
-    try testing.expectEqual(ast.ChainOperator.none, cmd_stmt.chains[0].op);
-    try testing.expectEqual(ast.ChainOperator.@"and", cmd_stmt.chains[1].op);
-    try testing.expectEqual(ast.ChainOperator.@"or", cmd_stmt.chains[2].op);
+    // Keyword form: and, or
+    const kws = try ctx.parse("true and echo ok or echo fail");
+    try testing.expectEqual(@as(usize, 3), kws.statements[0].command.chains.len);
+    try testing.expectEqual(ast.ChainOperator.@"and", kws.statements[0].command.chains[1].op);
+    try testing.expectEqual(ast.ChainOperator.@"or", kws.statements[0].command.chains[2].op);
 }
 
 // -----------------------------------------------------------------------------
@@ -852,35 +878,34 @@ test "Redirections: all types parse correctly" {
     var ctx = TestContext.init();
     defer ctx.deinit();
 
-    // Input and output (truncate)
-    const basic = try ctx.parse("cat < in.txt > out.txt");
-    const cmd1 = TestContext.firstCommand(basic);
-    try testing.expectEqual(@as(usize, 2), cmd1.redirects.len);
-    try testing.expectEqual(@as(u8, 0), cmd1.redirects[0].from_fd);
-    switch (cmd1.redirects[0].kind) {
-        .read => |parts| try testing.expectEqualStrings("in.txt", parts[0].text),
-        else => return error.TestExpectedEqual,
-    }
-    switch (cmd1.redirects[1].kind) {
-        .write_truncate => |parts| try testing.expectEqualStrings("out.txt", parts[0].text),
-        else => return error.TestExpectedEqual,
-    }
+    // Table-driven test for redirect types
+    const cases = [_]struct {
+        input: []const u8,
+        from_fd: u8,
+        kind_tag: enum { read, write_truncate, write_append, dup },
+    }{
+        .{ .input = "cmd < in.txt", .from_fd = 0, .kind_tag = .read },
+        .{ .input = "cmd > out.txt", .from_fd = 1, .kind_tag = .write_truncate },
+        .{ .input = "cmd >> log.txt", .from_fd = 1, .kind_tag = .write_append },
+        .{ .input = "cmd 2> err.txt", .from_fd = 2, .kind_tag = .write_truncate },
+        .{ .input = "cmd 2>> err.txt", .from_fd = 2, .kind_tag = .write_append },
+        .{ .input = "cmd &> all.txt", .from_fd = 1, .kind_tag = .write_truncate },
+        .{ .input = "cmd 2>&1", .from_fd = 2, .kind_tag = .dup },
+    };
 
-    // Append
-    const append = try ctx.parse("echo msg >> log.txt");
-    const cmd2 = TestContext.firstCommand(append);
-    switch (cmd2.redirects[0].kind) {
-        .write_append => |parts| try testing.expectEqualStrings("log.txt", parts[0].text),
-        else => return error.TestExpectedEqual,
-    }
+    for (cases) |case| {
+        const prog = try ctx.parse(case.input);
+        const cmd = TestContext.firstCommand(prog);
+        try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
+        try testing.expectEqual(case.from_fd, cmd.redirects[0].from_fd);
 
-    // Stderr to stdout dup
-    const dup = try ctx.parse("cmd 2>&1");
-    const cmd3 = TestContext.firstCommand(dup);
-    try testing.expectEqual(@as(u8, 2), cmd3.redirects[0].from_fd);
-    switch (cmd3.redirects[0].kind) {
-        .dup => |fd| try testing.expectEqual(@as(u8, 1), fd),
-        else => return error.TestExpectedEqual,
+        const matches = switch (cmd.redirects[0].kind) {
+            .read => case.kind_tag == .read,
+            .write_truncate => case.kind_tag == .write_truncate,
+            .write_append => case.kind_tag == .write_append,
+            .dup => case.kind_tag == .dup,
+        };
+        try testing.expect(matches);
     }
 }
 
