@@ -3,14 +3,8 @@
 //! Provides cursor control, screen clearing, and terminal mode management.
 //! All commands are no-ops when stdout is not a TTY, making scripts safe to pipe.
 //!
-//! Commands:
-//!   terminal save                     Save cursor position
-//!   terminal restore                  Restore cursor position
-//!   terminal move [--up N] [--down N] [--left N] [--right N] [--home]
-//!   terminal clear [--lines N] [--screen] [--below] [--all]
-//!   terminal enable [--cursor] [--mouse] [--focus] [--alternate]
-//!   terminal disable [--cursor] [--mouse] [--focus] [--alternate]
-//!   terminal title "text"             Set window title
+//! NOTE: Does not use Args API - implements subcommand dispatch pattern which
+//! Args API doesn't currently support well (would require awkward argv construction).
 
 const std = @import("std");
 const builtins = @import("../builtins.zig");
@@ -20,7 +14,47 @@ const io = @import("../../terminal/io.zig");
 pub const builtin = builtins.Builtin{
     .name = "terminal",
     .run = run,
-    .help = "terminal <cmd> [flags] - Terminal control (save, restore, move, clear, enable, disable, title)",
+    .help =
+    \\terminal <command> [options]
+    \\
+    \\Terminal control for TUI scripting. All commands are no-ops when stdout
+    \\is not a TTY, making scripts safe to pipe.
+    \\
+    \\Commands:
+    \\  save                        Save cursor position
+    \\  restore                     Restore cursor position
+    \\  move [options]              Move cursor
+    \\  clear [options]             Clear screen/lines
+    \\  enable [options]            Enable terminal features
+    \\  disable [options]           Disable terminal features
+    \\  title <text>                Set window title
+    \\
+    \\Move options:
+    \\  --up [N]                    Move cursor up N lines (default: 1)
+    \\  --down [N]                  Move cursor down N lines (default: 1)
+    \\  --left [N]                  Move cursor left N columns (default: 1)
+    \\  --right [N]                 Move cursor right N columns (default: 1)
+    \\  --home                      Move cursor to home position (0,0)
+    \\
+    \\Clear options:
+    \\  --lines N                   Clear N lines starting from current
+    \\  --screen                    Clear entire screen
+    \\  --below                     Clear from cursor to end of screen
+    \\  --all                       Clear screen and scrollback
+    \\  (no options)                Clear current line
+    \\
+    \\Enable/disable options:
+    \\  --cursor                    Show/hide cursor
+    \\  --mouse                     Enable/disable mouse reporting
+    \\  --focus                     Enable/disable focus events
+    \\  --alternate                 Enter/exit alternate screen buffer
+    \\
+    \\Examples:
+    \\  terminal move --up 5 --left 3       # Move cursor up 5, left 3
+    \\  terminal clear --lines 10           # Clear 10 lines
+    \\  terminal enable --mouse --cursor    # Enable mouse and show cursor
+    \\  terminal title "My Script"          # Set window title
+    ,
 };
 
 // =============================================================================

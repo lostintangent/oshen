@@ -73,17 +73,11 @@ pub fn main() !void {
             try repl.run(allocator, &state, interpreter.execute);
         },
         .command => |cmd| {
-            const status = interpreter.execute(allocator, &state, cmd) catch |err| {
-                io.printError("oshen: {}\n", .{err});
-                std.process.exit(1);
-            };
+            const status = interpreter.execute(allocator, &state, cmd) catch 1;
             std.process.exit(status);
         },
         .script => |path| {
-            const status = interpreter.executeFile(allocator, &state, path) catch |err| {
-                io.printError("oshen: {s}: {}\n", .{ path, err });
-                std.process.exit(1);
-            };
+            const status = interpreter.executeFile(allocator, &state, path) catch 1;
             std.process.exit(status);
         },
     }

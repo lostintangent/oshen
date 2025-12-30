@@ -117,9 +117,10 @@ pub const State = struct {
     should_exit: bool = false,
     exit_code: u8 = 0,
 
-    /// Stack of deferred commands (LIFO execution order).
-    /// CommandStatements contain slices that point into the cached function AST.
-    deferred: std.ArrayListUnmanaged(ast.CommandStatement),
+    /// Stack of deferred command source strings (LIFO execution order).
+    /// Stores source text that is parsed on-demand during execution.
+    /// Each string is allocated with state.allocator for long-term storage.
+    deferred: std.ArrayListUnmanaged([]const u8),
 
     /// Pool of reusable scopes to avoid allocation overhead in hot loops.
     /// When a scope is released, it's reset and added here for reuse.
@@ -204,7 +205,10 @@ pub const State = struct {
         // Clean up jobs
         self.jobs.deinit();
 
-        // Deferred commands are pointers into cached AST, no need to free contents
+        // Free deferred command sources (they were duplicated into state.allocator)
+        for (self.deferred.items) |source| {
+            self.allocator.free(source);
+        }
         self.deferred.deinit(self.allocator);
 
         // Free pooled scopes
@@ -465,16 +469,23 @@ pub const State = struct {
     // Deferred Commands
     // =========================================================================
 
-    /// Push a deferred command onto the stack (executed LIFO on function exit).
-    /// The CommandStatement's internal slices point into the cached AST, so no deep copy needed.
-    pub fn pushDefer(self: *State, cmd_stmt: ast.CommandStatement) !void {
-        try self.deferred.append(self.allocator, cmd_stmt);
+    /// Push a deferred command source onto the stack (executed LIFO on function exit).
+    /// The source string is duplicated into state's allocator for long-term storage.
+    pub fn pushDefer(self: *State, source: []const u8) !void {
+        const duped = try self.allocator.dupe(u8, source);
+        try self.deferred.append(self.allocator, duped);
     }
 
-    /// Pop and return the last deferred command, or null if empty
-    pub fn popDeferred(self: *State) ?ast.CommandStatement {
+    /// Pop and return the last deferred command source, or null if empty.
+    /// Caller should free the returned slice after use.
+    pub fn popDeferred(self: *State) ?[]const u8 {
         if (self.deferred.items.len == 0) return null;
         return self.deferred.pop();
+    }
+
+    /// Free a deferred command source string
+    pub fn freeDeferred(self: *State, source: []const u8) void {
+        self.allocator.free(source);
     }
 };
 

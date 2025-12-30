@@ -39,18 +39,20 @@ const Capture = ast.Capture;
 const CaptureMode = ast.CaptureMode;
 
 pub const ParseError = error{
-    UnexpectedEOF,
-    InvalidCapture,
-    CaptureWithBackground,
     InvalidFunctionName,
+    InvalidEach,
+    InvalidCapture,
     UnterminatedFunction,
     UnterminatedIf,
-    InvalidEach,
     UnterminatedEach,
     UnterminatedWhile,
     MissingSeparator,
+    MissingCondition,
+    MissingBody,
     ConditionWithBackground,
     ConditionWithCapture,
+    CaptureWithBackground,
+    UnexpectedEOF,
     OutOfMemory,
 };
 
@@ -73,6 +75,16 @@ pub const Parser = struct {
             .allocator = allocator,
             .input = input,
         };
+    }
+
+    /// Get the byte position for error reporting.
+    pub fn errorPos(self: *const Parser) usize {
+        if (self.pos < self.tokens.len) {
+            return self.tokens[self.pos].span.start;
+        } else if (self.tokens.len > 0) {
+            return self.tokens[self.tokens.len - 1].span.end;
+        }
+        return 0;
     }
 
     // =========================================================================
@@ -429,24 +441,34 @@ pub const Parser = struct {
         return self.input[start_byte..@min(end_byte, self.input.len)];
     }
 
-    /// Captures source text from current position until a block terminator.
-    /// Returns the trimmed body text with parser positioned at the terminator.
+    /// Captures a block body (the content between a construct's header and its terminator).
+    ///
+    /// Enforces two requirements:
+    /// 1. A separator (`;` or newline) must precede the body
+    /// 2. The body must be non-empty
+    ///
+    /// Scans until reaching `end` or any keyword in `terminators` (e.g., `else`).
+    /// Returns the trimmed body source, or fails with `MissingSeparator`/`MissingBody`/`err`.
     fn captureBlockBody(self: *Parser, terminators: []const []const u8, err: ParseError) ParseError![]const u8 {
+        if (!self.isSeparator()) return ParseError.MissingSeparator;
+        self.skipSeparators();
+
         const body_start = self.pos;
         const end_pos = self.scanToBlockEnd(terminators) orelse return err;
-        return std.mem.trim(u8, self.extractSourceRange(body_start, end_pos), " \t\n");
+        const body = std.mem.trim(u8, self.extractSourceRange(body_start, end_pos), " \t\n");
+
+        if (body.len == 0) return ParseError.MissingBody;
+        return body;
     }
 
     /// Captures condition source (tokens until separator).
-    /// Advances past the condition and skips trailing separators.
+    /// Advances past the condition, leaving parser at the separator.
     fn captureCondition(self: *Parser) []const u8 {
         const start = self.pos;
         while (self.pos < self.tokens.len and !self.isSeparator()) {
             _ = self.advance();
         }
-        const result = self.extractSourceRange(start, self.pos);
-        self.skipSeparators();
-        return std.mem.trim(u8, result, " \t\n");
+        return std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
     }
 
     // =========================================================================
@@ -456,12 +478,9 @@ pub const Parser = struct {
     /// Parses a function definition: `fun name ... end`
     fn parseFunctionDefinition(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'fun'
-        self.skipSeparators();
 
         if (!self.isWord()) return ParseError.InvalidFunctionName;
         const name = extractSimpleWord(self.advance().?) orelse return ParseError.InvalidFunctionName;
-
-        self.skipSeparators();
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedFunction);
         try self.consumeEnd();
 
@@ -479,19 +498,17 @@ pub const Parser = struct {
 
         // Parse else-if chains and final else
         var else_body: ?[]const u8 = null;
-
         while (self.pos < self.tokens.len) {
             if (self.isKeyword("else")) {
                 _ = self.advance(); // consume 'else'
-                self.skipSeparators();
 
                 if (self.isKeyword("if")) {
-                    // else if - parse another branch
+                    // else if
                     _ = self.advance(); // consume 'if'
                     const branch = try self.parseIfBranch();
                     try branches.append(self.allocator, branch);
                 } else {
-                    // Final else - capture body until end
+                    // Final else
                     else_body = try self.captureBlockBody(&.{}, ParseError.UnterminatedIf);
                     try self.consumeEnd();
                     break;
@@ -511,11 +528,11 @@ pub const Parser = struct {
     }
 
     /// Parses a single if/else-if branch (condition + body).
-    /// Expects parser to be positioned after 'if' keyword.
+    /// Expects parser positioned after 'if' keyword.
     fn parseIfBranch(self: *Parser) ParseError!IfBranch {
-        self.skipSeparators();
+        // Condition must immediately follow 'if' - no separator allowed
+        if (!self.isWord()) return ParseError.MissingCondition;
         const condition = try self.parseSimpleCommand() orelse return ParseError.UnexpectedEOF;
-        self.skipSeparators();
         const body = try self.captureBlockBody(&.{"else"}, ParseError.UnterminatedIf);
         return .{ .condition = condition, .body = body };
     }
@@ -531,19 +548,18 @@ pub const Parser = struct {
     /// Sets $item (or custom var) and $index (1-based) on each iteration.
     fn parseEachStatement(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'each' or 'for'
-        self.skipSeparators();
 
+        // Items/variable must immediately follow 'each'/'for' - no separator allowed
         if (!self.isWord()) return ParseError.InvalidEach;
 
         // Look ahead: is this `VAR in ITEMS` or just `ITEMS`?
         const first_word_pos = self.pos;
         const first_word_tok = self.advance().?;
-        self.skipSeparators();
 
         const variable: []const u8 = if (self.isKeyword("in")) blk: {
             // `var in items` form - extract variable name
             _ = self.advance(); // consume 'in'
-            self.skipSeparators();
+            if (!self.isWord()) return ParseError.InvalidEach;
             break :blk extractSimpleWord(first_word_tok) orelse return ParseError.InvalidEach;
         } else blk: {
             // `items` form - rewind and use default variable name
@@ -565,10 +581,10 @@ pub const Parser = struct {
     /// Parses a while loop: `while condition ... end`
     fn parseWhileStatement(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'while'
-        self.skipSeparators();
 
+        // Condition must immediately follow 'while' - no separator allowed
+        if (!self.isWord()) return ParseError.MissingCondition;
         const condition = try self.parseSimpleCommand() orelse return ParseError.UnexpectedEOF;
-        self.skipSeparators();
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedWhile);
         try self.consumeEnd();
 
@@ -613,10 +629,21 @@ pub const Parser = struct {
     }
 
     /// Parses a defer statement.
+    /// Stores the source text of the deferred command (parsed on-demand during execution).
     fn parseDeferStatement(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'defer'
+        const start = self.pos;
+
+        // Parse the command to validate it and advance past it
         const cmd_stmt = try self.parseSimpleCommand() orelse return ParseError.UnexpectedEOF;
-        return .{ .@"defer" = cmd_stmt };
+
+        // Validate: defer cannot use background or capture
+        if (cmd_stmt.background) return ParseError.ConditionWithBackground;
+        if (cmd_stmt.capture != null) return ParseError.ConditionWithCapture;
+
+        // Extract the source text of the command (will be parsed again during execution)
+        const source = std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
+        return .{ .@"defer" = source };
     }
 
     /// Parses an output capture (=> or =>@).
@@ -941,6 +968,7 @@ test "Functions: errors" {
 
     try ctx.expectError("fun greet\n  echo hello", ParseError.UnterminatedFunction);
     try ctx.expectError("fun \"quoted\" body end", ParseError.InvalidFunctionName);
+    try ctx.expectError("fun greet; end", ParseError.MissingBody);
 }
 
 // -----------------------------------------------------------------------------
@@ -1013,6 +1041,31 @@ test "If: unterminated error" {
     try ctx.expectError("if true\n  echo yes", ParseError.UnterminatedIf);
 }
 
+test "If: missing condition error" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    try ctx.expectError("if; echo hello; end", ParseError.MissingCondition);
+    try ctx.expectError("if\necho hello\nend", ParseError.MissingCondition);
+    try ctx.expectError("if false; echo no; else if; echo yes; end", ParseError.MissingCondition);
+}
+
+test "If: missing body error" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    try ctx.expectError("if true; end", ParseError.MissingBody);
+    try ctx.expectError("if true; echo a; else; end", ParseError.MissingBody);
+    try ctx.expectError("if true; echo a; else if true; end", ParseError.MissingBody);
+}
+
+test "If: else requires separator before body" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    try ctx.expectError("if true; echo a; else echo b; end", ParseError.MissingSeparator);
+}
+
 // -----------------------------------------------------------------------------
 // While Loops
 // -----------------------------------------------------------------------------
@@ -1047,6 +1100,21 @@ test "While: unterminated error" {
     defer ctx.deinit();
 
     try ctx.expectError("while true\n  echo loop", ParseError.UnterminatedWhile);
+}
+
+test "While: missing condition error" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    try ctx.expectError("while; echo loop; end", ParseError.MissingCondition);
+    try ctx.expectError("while\necho loop\nend", ParseError.MissingCondition);
+}
+
+test "While: missing body error" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    try ctx.expectError("while true; end", ParseError.MissingBody);
 }
 
 // -----------------------------------------------------------------------------
@@ -1099,21 +1167,18 @@ test "Defer: command forms" {
     var ctx = TestContext.init();
     defer ctx.deinit();
 
-    // Simple command
+    // Simple command - now stores source text instead of parsed AST
     const simple = try ctx.parse("defer rm -rf $tmpdir");
     const defer1 = simple.statements[0].@"defer";
-    try testing.expectEqual(false, defer1.background);
-    try testing.expectEqual(@as(usize, 3), defer1.chains[0].pipeline.commands[0].words.len);
+    try testing.expectEqualStrings("rm -rf $tmpdir", defer1);
 
     // With pipeline
-    const pipeline = try ctx.parse("defer cat file | grep foo");
-    try testing.expectEqual(@as(usize, 2), pipeline.statements[0].@"defer".chains[0].pipeline.commands.len);
+    const pipeline_prog = try ctx.parse("defer cat file | grep foo");
+    try testing.expectEqualStrings("cat file | grep foo", pipeline_prog.statements[0].@"defer");
 
     // With logical chain
     const logical = try ctx.parse("defer rm file && echo done");
-    const defer3 = logical.statements[0].@"defer";
-    try testing.expectEqual(@as(usize, 2), defer3.chains.len);
-    try testing.expectEqual(ast.ChainOperator.@"and", defer3.chains[1].op);
+    try testing.expectEqualStrings("rm file && echo done", logical.statements[0].@"defer");
 }
 
 test "Defer: in function body" {
@@ -1189,4 +1254,12 @@ test "Each: unterminated error" {
     defer ctx.deinit();
 
     try ctx.expectError("each a b c\n  echo $item", ParseError.UnterminatedEach);
+}
+
+test "Each: missing body error" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    try ctx.expectError("each a b c; end", ParseError.MissingBody);
+    try ctx.expectError("for x in 1 2 3; end", ParseError.MissingBody);
 }

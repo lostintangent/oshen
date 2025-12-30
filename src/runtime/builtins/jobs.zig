@@ -3,6 +3,7 @@
 //! In interactive mode, displays a TUI for selecting jobs.
 //! In non-interactive mode (pipes, redirects), prints a simple list.
 //!
+//! NOTE: Does not use Args API - takes zero arguments, simply lists jobs.
 //! NOTE: No unit or E2E tests - requires TTY and real process groups.
 
 const std = @import("std");

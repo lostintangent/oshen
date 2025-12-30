@@ -25,7 +25,7 @@ const Separator = token_types.Separator;
 
 pub const LexError = error{
     UnterminatedString,
-    UnterminatedCmdSub,
+    UnterminatedCommandSubstitution,
 };
 
 pub const Lexer = struct {
@@ -264,7 +264,7 @@ pub const Lexer = struct {
             try buf.append(self.allocator, ch);
             self.advance();
         }
-        return LexError.UnterminatedCmdSub;
+        return LexError.UnterminatedCommandSubstitution;
     }
 
     // =========================================================================
@@ -710,5 +710,5 @@ test "Errors: unterminated strings and substitutions" {
 
     try ctx.expectError("echo 'hello", LexError.UnterminatedString);
     try ctx.expectError("echo \"hello", LexError.UnterminatedString);
-    try ctx.expectError("echo $(whoami", LexError.UnterminatedCmdSub);
+    try ctx.expectError("echo $(whoami", LexError.UnterminatedCommandSubstitution);
 }

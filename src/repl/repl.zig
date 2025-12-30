@@ -137,10 +137,8 @@ pub fn run(allocator: std.mem.Allocator, state: *State, evalFn: EvalFn) !void {
         // Clear any stale interrupt flag before executing (could be set by Ctrl+C during prompt)
         state.interrupted = false;
 
-        // Execute the command
-        _ = evalFn(allocator, state, line) catch |err| {
-            io.printError("oshen: {}\n", .{err});
-        };
+        // Execute the command (Note: Parse errors will be automatically printed to stdout)
+        _ = evalFn(allocator, state, line) catch {};
 
         // If command was interrupted, print ^C for visual feedback
         if (state.interrupted) {

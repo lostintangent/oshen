@@ -1,13 +1,7 @@
 //! calc builtin - evaluate arithmetic expressions
 //!
-//! Supports: + - * / % with proper precedence, parentheses for grouping.
-//! For multiplication, use either * (requires quoting) or x (no quoting needed).
-//!
-//! Examples:
-//!   calc 2 + 3           → 5
-//!   = 2 + 3 x 4          → 14 (precedence, x for multiplication)
-//!   = "(2 + 3) * 4"      → 20 (parens, quoted *)
-//!   = $x + 1             → variable + 1
+//! NOTE: Does not use Args API - joins all arguments into a single expression
+//! string and uses recursive descent parser to evaluate with proper precedence.
 
 const std = @import("std");
 const builtins = @import("../builtins.zig");
@@ -15,13 +9,43 @@ const builtins = @import("../builtins.zig");
 pub const builtin = builtins.Builtin{
     .name = "calc",
     .run = run,
-    .help = "calc <expression> - Evaluate arithmetic expression (+ - x * / %)",
+    .help =
+    \\calc EXPRESSION
+    \\= EXPRESSION
+    \\
+    \\Evaluate arithmetic expressions and print the result.
+    \\All arguments are joined with spaces to form the expression.
+    \\
+    \\Operators (in order of precedence):
+    \\  ( )         Grouping (highest precedence)
+    \\  - (unary)   Negation
+    \\  * x / %     Multiplication, division, modulo
+    \\  + -         Addition, subtraction (lowest precedence)
+    \\
+    \\Notes:
+    \\  - Use 'x' for multiplication without quotes: calc 2 x 3
+    \\  - Use '*' for multiplication with quotes: calc "2 * 3"
+    \\  - Operators are left-associative: 10 - 5 - 2 = (10 - 5) - 2 = 3
+    \\  - Integer arithmetic only (i64)
+    \\  - Division by zero returns an error
+    \\  - Overflow detection enabled
+    \\
+    \\Examples:
+    \\  calc 2 + 3                  # Simple addition → 5
+    \\  = 2 + 3 x 4                 # Precedence → 14
+    \\  calc "(2 + 3) * 4"          # Grouping → 20
+    \\  = 10 / 3                    # Integer division → 3
+    \\  calc 17 % 5                 # Modulo → 2
+    \\  = -5 + 3                    # Unary minus → -2
+    \\  calc 2 x 3 x 4              # Left associative → 24
+    \\  = $x + 1                    # Using variables
+    ,
 };
 
 pub const equals_builtin = builtins.Builtin{
     .name = "=",
     .run = run,
-    .help = "= <expression> - Evaluate arithmetic expression (+ - x * / %) (alias for calc)",
+    .help = "= EXPR - Evaluate arithmetic expression (alias for calc)",
 };
 
 fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {

@@ -4,12 +4,8 @@
 //! interleaved with text arguments. Automatically resets color at end.
 //! Uses buffered output for minimal syscalls.
 //!
-//! Usage: print [-n] [--color]... [text]...
-//! Examples:
-//!   print --green "success"                     # Green text, auto-reset
-//!   print --bold --red "error" --reset "normal" # Mixed styles
-//!   print -n --blue "status: "                  # No newline, still resets
-//!   print --nl --yellow "section"               # Extra newline before text
+//! NOTE: Does not use Args API - simple loop over args with StaticStringMap lookup
+//! is clearer and more direct than Args wrapper for this use case.
 
 const std = @import("std");
 const builtins = @import("../builtins.zig");
@@ -19,7 +15,40 @@ const Writer = @import("../../terminal/io.zig").Writer;
 pub const builtin = builtins.Builtin{
     .name = "print",
     .run = run,
-    .help = "print [-n] [--color]... [text]... - Print with colors (--nl, --green, --red, --yellow, --blue, --magenta, --purple, --cyan, --gray, --bold, --dim, --reset)",
+    .help =
+    \\print [-n] [--color]... [text]...
+    \\
+    \\Print text with inline color/style support. Behaves like echo but supports
+    \\ANSI color codes via flags that can be mixed with text arguments.
+    \\Automatically resets formatting at end to prevent color bleed.
+    \\
+    \\Options:
+    \\  -n          Omit trailing newline (like echo -n)
+    \\
+    \\Colors:
+    \\  --red       Red text
+    \\  --green     Green text
+    \\  --yellow    Yellow text
+    \\  --blue      Blue text
+    \\  --cyan      Cyan text
+    \\  --magenta   Magenta text
+    \\  --purple    Alias for magenta
+    \\  --gray      Gray text
+    \\
+    \\Styles:
+    \\  --bold      Bold/bright text
+    \\  --dim       Dim/faint text
+    \\  --reset     Reset to default (useful mid-output)
+    \\
+    \\Formatting:
+    \\  --nl        Emit a newline (useful for spacing)
+    \\
+    \\Examples:
+    \\  print --green "success"                    # Green text, auto-reset
+    \\  print --bold --red "error" --reset normal  # Mixed styles
+    \\  print -n --blue "status: "                 # No newline, color resets
+    \\  print --nl --yellow "Section"              # Blank line before output
+    ,
 };
 
 /// O(1) lookup table for color/style flags

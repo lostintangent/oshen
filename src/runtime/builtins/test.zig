@@ -1,16 +1,7 @@
 //! test/[ builtin - evaluate conditional expressions
 //!
-//! Supports:
-//!   File tests: -e, -f, -d, -r, -w, -x, -s, -L
-//!   String tests: -z, -n, =, !=
-//!   Numeric tests: -eq, -ne, -lt, -le, -gt, -ge
-//!   Logical: !, -a, -o, (, )
-//!
-//! Usage:
-//!   test EXPRESSION
-//!   [ EXPRESSION ]
-
-// TODO: Convert to the new args parsing system
+//! NOTE: Does not use Args API - implements custom recursive expression evaluator
+//! for handling complex boolean logic with operators, parentheses, and precedence.
 
 const std = @import("std");
 const builtins = @import("../builtins.zig");
@@ -18,7 +9,55 @@ const builtins = @import("../builtins.zig");
 pub const builtin = builtins.Builtin{
     .name = "test",
     .run = run,
-    .help = "test EXPR - Evaluate conditional expression",
+    .help =
+    \\test EXPRESSION
+    \\[ EXPRESSION ]
+    \\
+    \\Evaluate conditional expressions for use in if/while statements.
+    \\Returns 0 (true) if expression evaluates to true, 1 (false) otherwise.
+    \\
+    \\File tests:
+    \\  -e FILE         True if file exists
+    \\  -f FILE         True if file exists and is regular file
+    \\  -d FILE         True if file exists and is directory
+    \\  -r FILE         True if file exists and is readable
+    \\  -w FILE         True if file exists and is writable
+    \\  -x FILE         True if file exists and is executable
+    \\  -s FILE         True if file exists and has size > 0
+    \\  -L FILE         True if file exists and is symbolic link
+    \\  -h FILE         Alias for -L
+    \\
+    \\String tests:
+    \\  -z STRING       True if string is empty
+    \\  -n STRING       True if string is non-empty
+    \\  STR1 = STR2     True if strings are equal
+    \\  STR1 == STR2    Alias for =
+    \\  STR1 != STR2    True if strings are not equal
+    \\
+    \\Numeric tests:
+    \\  N1 -eq N2       True if integers are equal
+    \\  N1 -ne N2       True if integers are not equal
+    \\  N1 -lt N2       True if N1 is less than N2
+    \\  N1 -le N2       True if N1 is less than or equal to N2
+    \\  N1 -gt N2       True if N1 is greater than N2
+    \\  N1 -ge N2       True if N1 is greater than or equal to N2
+    \\
+    \\Logical operators:
+    \\  ! EXPR          True if EXPR is false (negation)
+    \\  EXPR1 -a EXPR2  True if both expressions are true (and)
+    \\  EXPR1 -o EXPR2  True if either expression is true (or)
+    \\  ( EXPR )        Group expressions (requires spaces around parens)
+    \\
+    \\Examples:
+    \\  test -f file.txt              # Check if file exists
+    \\  [ -d /tmp ]                   # Check if directory exists
+    \\  test -n "$var"                # Check if variable is non-empty
+    \\  [ "$a" = "$b" ]               # String equality
+    \\  test 5 -gt 3                  # Numeric comparison
+    \\  [ -f file.txt -a -r file.txt ]  # File exists and is readable
+    \\  test ! -e file.txt            # File does not exist
+    \\  [ \( -f a -o -f b \) -a -x c ]  # Complex expression with grouping
+    ,
 };
 
 pub const bracket_builtin = builtins.Builtin{

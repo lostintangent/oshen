@@ -195,7 +195,12 @@ test_exit_code "Test not equal" "test 1 -ne 2" "0"
 # ============================================================================
 # Loops (Each/For/While)
 # ============================================================================
-print_header "Each Loops (22 tests)"
+print_header "Each Loops (25 tests)"
+
+# Empty variable iteration (should iterate zero times, not once with empty string)
+test_case "Each empty var no iteration" "var empty; for x in \$empty; echo should_not_print; end; echo done" "done"
+test_case "Each undefined no iteration" "for x in \$undefined_var_xyz123; echo should_not_print; end; echo done" "done"
+test_case "Each empty string skipped" "for x in \"\" a \"\" b \"\"; echo -n \$x; end" "ab"
 
 # Each with implicit $item and $index
 test_case "Each implicit item" "each a b c; echo -n \$item; end" "abc"
@@ -230,12 +235,12 @@ test_case "Each single item" "each only; echo \$item:\$index; end" "only:1"
 test_case "Each inline form" "each a b c; echo -n \$item; end" "abc"
 
 # Variable scoping - $item and $index restored after loop
-test_case "item unset after loop" "each a b; end; echo [\$item]" "[]"
-test_case "index unset after loop" "each a b; end; echo [\$index]" "[]"
-test_case "Outer item restored" "var item outer; each a b; end; echo \$item" "outer"
-test_case "Outer index restored" "var index 99; each a b; end; echo \$index" "99"
-test_case "Nested item shadowing" "each X Y; var o \$item; each 1 2; end; echo -n \$item; end" "XY"
-test_case "Nested index shadowing" "each X Y; var oi \$index; each 1 2; end; echo -n \$index; end" "12"
+test_case "item unset after loop" "each a b; true; end; echo [\$item]" "[]"
+test_case "index unset after loop" "each a b; true; end; echo [\$index]" "[]"
+test_case "Outer item restored" "var item outer; each a b; true; end; echo \$item" "outer"
+test_case "Outer index restored" "var index 99; each a b; true; end; echo \$index" "99"
+test_case "Nested item shadowing" "each X Y; var o \$item; each 1 2; true; end; echo -n \$item; end" "XY"
+test_case "Nested index shadowing" "each X Y; var oi \$index; each 1 2; true; end; echo -n \$index; end" "12"
 
 # ============================================================================
 # Block Scoping
@@ -267,13 +272,12 @@ test_case "Nested loop updates outer" "var x 0; each a; each b; var x \$item; en
 # ============================================================================
 # While Loops and Loop Control
 # ============================================================================
-print_header "While Loops (5 tests)"
+print_header "While Loops (4 tests)"
 
 test_case "While false" "while false; echo never; end; echo done" "done"
 test_exit_code "While with break" "var i 0; while true; var i 1; break; end" "0"
 test_exit_code "For continue skips" "for x in 1 2 3; if test \$x = 2; continue; end; echo \$x; end" "0"
 test_case "For continue output" "for x in a b c; if test \$x = b; continue; end; echo -n \$x; end" "ac"
-test_case "Empty loop body" "for x in a b c; end; echo done" "done"
 
 # ============================================================================
 # Functions
@@ -636,7 +640,7 @@ test_case "Print gray text" 'print --gray muted' "\e[90mmuted\e[0m"
 # ============================================================================
 # Defer Statements
 # ============================================================================
-print_header "Defer Statements (6 tests)"
+print_header "Defer Statements (10 tests)"
 
 test_case "Simple defer" "fun f; defer echo cleanup; echo work; end; f" "work
 cleanup"
@@ -653,6 +657,18 @@ inner_cleanup
 outer_work
 outer_cleanup"
 test_exit_code "Defer preserves exit status" "fun f; defer echo cleanup; return 42; end; f" "42"
+
+# Tests for defer inside control flow blocks (previously caused segfault)
+test_case "Defer in if block" "fun f; defer echo outer; if true; defer echo inner; end; echo body; end; f" "body
+inner
+outer"
+test_case "Defer in else block" "fun f; defer echo outer; if false; echo no; else; defer echo else_defer; end; echo body; end; f" "body
+else_defer
+outer"
+test_case "Defer with conditional return" "fun f; defer echo d1; defer echo d2; if test \$1 -eq 1; defer echo d3; return 1; end; defer echo d4; return 0; end; f 1" "d3
+d2
+d1"
+test_exit_code "Defer conditional return status" "fun f; defer echo d1; if true; defer echo d2; return 5; end; end; f" "5"
 
 # ============================================================================
 # Calc Builtin (and = alias)

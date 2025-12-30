@@ -195,8 +195,9 @@ pub const Statement = union(enum) {
     /// Return from current function with optional status (raw source, expanded at runtime)
     @"return": ?[]const u8,
     /// Defer a command to run when the current function exits.
-    /// Stores the pre-parsed command (always has background=false, capture=null).
-    @"defer": CommandStatement,
+    /// Stores the raw source text (parsed on-demand during execution).
+    /// This ensures the deferred command survives arena cleanup of nested blocks.
+    @"defer": []const u8,
     /// Exit the shell with optional status code (raw source, expanded at runtime)
     exit: ?[]const u8,
 };

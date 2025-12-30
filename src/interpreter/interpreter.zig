@@ -22,14 +22,48 @@ const exec = @import("execution/exec.zig");
 const lexer = @import("../language/lexer.zig");
 const parser = @import("../language/parser.zig");
 const ast_mod = @import("../language/ast.zig");
+const tokens = @import("../language/tokens.zig");
 const capture = @import("execution/capture.zig");
-
-// =============================================================================
-// Constants
-// =============================================================================
+const io = @import("../terminal/io.zig");
+const ansi = @import("../terminal/ansi.zig");
 
 /// Maximum file size for script execution (prevents accidental memory exhaustion)
 const MAX_SCRIPT_SIZE: usize = 1024 * 1024; // 1MB
+
+// =============================================================================
+// Error Reporting
+// =============================================================================
+
+/// Formats a PascalCase error name as readable text: "InvalidEach" → "invalid each"
+fn formatErrorName(buf: []u8, name: []const u8) []const u8 {
+    var len: usize = 0;
+    for (name, 0..) |c, i| {
+        // Add space before uppercase letters (except at start)
+        if (i > 0 and std.ascii.isUpper(c)) {
+            if (len < buf.len) {
+                buf[len] = ' ';
+                len += 1;
+            }
+        }
+        // Lowercase all characters
+        if (len < buf.len) {
+            buf[len] = std.ascii.toLower(c);
+            len += 1;
+        }
+    }
+    return buf[0..len];
+}
+
+fn printSyntaxError(input: []const u8, byte_pos: usize, err: anyerror) void {
+    const lc = tokens.TokenSpan.getLineCol(input, byte_pos);
+    var buf: [64]u8 = undefined;
+    const msg = formatErrorName(&buf, @errorName(err));
+    io.printError(
+        ansi.bold ++ ansi.red ++ "Syntax error" ++ ansi.reset ++
+            ansi.dim ++ " ({d}:{d})" ++ ansi.reset ++ ": {s}\n",
+        .{ lc.line, lc.col, msg },
+    );
+}
 
 // =============================================================================
 // Types
@@ -76,18 +110,26 @@ pub const ParsedInput = struct {
 /// The caller must keep the allocator alive for the lifetime of the `ParsedInput`.
 pub fn parseInput(allocator: std.mem.Allocator, input: []const u8) !ParsedInput {
     var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
+    const toks = lex.tokenize() catch |err| {
+        printSyntaxError(input, lex.pos, err);
+        return err;
+    };
 
-    if (tokens.len == 0) {
+    if (toks.len == 0) {
         return ParsedInput{
             .ast = ast_mod.Program{ .statements = &[_]ast_mod.Statement{} },
             .input = input,
         };
     }
 
-    var p = parser.Parser.initWithInput(allocator, tokens, input);
+    var p = parser.Parser.initWithInput(allocator, toks, input);
+    const ast = p.parse() catch |err| {
+        printSyntaxError(input, p.errorPos(), err);
+        return err;
+    };
+
     return ParsedInput{
-        .ast = try p.parse(),
+        .ast = ast,
         .input = input,
     };
 }
@@ -111,6 +153,7 @@ pub fn parseInput(allocator: std.mem.Allocator, input: []const u8) !ParsedInput 
 pub fn executeAst(allocator: std.mem.Allocator, state: *State, parsed: ParsedInput) !u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+
     return executeAstWithArena(arena.allocator(), state, parsed);
 }
 

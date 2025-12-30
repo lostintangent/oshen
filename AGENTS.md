@@ -20,6 +20,7 @@ Tests are code we live in, not code that gets stale. So keep the following value
    3. Oshen's E2E tests (`scripts/e2e.wave`) are written in Oshen itself, and therefore, they provide a means of "dogfooding"/performance testing the system on every change. And since they run in <1s, they provide holistic signal without adding friction to the feedback loop.
 2. For unit tests specifically (see `src/language/lexer.zig` and `src/language/parser.zig` as canonical examples):
    - Organize tests with section headers and descriptive test names (e.g., `"Module: behavior being tested"`)
+   - Order tests logically within sections: basic functionality → complex cases → error cases
    - Consolidate related tests that share the same setup into a single test with inline comments
    - Use table-driven tests with anonymous tuples when testing multiple cases with the same structure
    - If tests need repetitive setup, create a `TestContext` struct to encapsulate allocation, the primary operation, and module-specific assertions. Omit this if setup is minimal (see `src/repl/editor/ui/highlight.zig`)

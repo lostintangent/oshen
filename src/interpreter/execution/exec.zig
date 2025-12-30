@@ -105,9 +105,9 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.S
             // If no argument, status is already the last command's exit status
             return state.status;
         },
-        .@"defer" => |cmd_stmt| {
-            // Push the pre-parsed command onto the defer stack (will be executed LIFO on function exit)
-            state.pushDefer(cmd_stmt) catch {
+        .@"defer" => |source| {
+            // Push the deferred command source onto the stack (will be parsed and executed LIFO on function exit)
+            state.pushDefer(source) catch {
                 return 1;
             };
             return 0;
@@ -153,9 +153,9 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.S
 
 /// Execute a shell body string, catching errors and returning a status code.
 /// Used by control flow statements (if, for) to break the error set cycle.
-fn executeBody(allocator: std.mem.Allocator, state: *State, body: []const u8, context: []const u8) u8 {
-    return interpreter_mod.execute(allocator, state, body) catch |err| {
-        io.printError("{s}: {}\n", .{ context, err });
+/// Parse errors are already printed by parseInput with line/column info.
+fn executeBody(allocator: std.mem.Allocator, state: *State, body: []const u8) u8 {
+    return interpreter_mod.execute(allocator, state, body) catch {
         return 1;
     };
 }
@@ -202,7 +202,7 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
             };
             defer state.releaseScope(); // Returns scope to pool for reuse
 
-            const body_status = executeBody(allocator, state, branch.body, "if: body error");
+            const body_status = executeBody(allocator, state, branch.body);
             // fn_return propagates automatically since we return the status
             return body_status;
         }
@@ -217,7 +217,7 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
         };
         defer state.releaseScope();
 
-        return executeBody(allocator, state, else_body, "if: else error");
+        return executeBody(allocator, state, else_body);
     }
 
     return 0;
@@ -242,8 +242,8 @@ fn executeEachStatement(allocator: std.mem.Allocator, state: *State, stmt: expan
     const items = expandItems(parse_alloc, state, stmt.items_source) orelse return 1;
 
     // Parse body once (cached for all iterations)
-    const body_ast = interpreter_mod.parseInput(parse_alloc, stmt.body) catch |err| {
-        io.printError("each: body parse error: {}\n", .{err});
+    // Parse errors are already printed by parseInput with line/column info
+    const body_ast = interpreter_mod.parseInput(parse_alloc, stmt.body) catch {
         return 1;
     };
 
@@ -275,8 +275,8 @@ fn executeEachStatement(allocator: std.mem.Allocator, state: *State, stmt: expan
             return 1;
         };
 
-        last_status = interpreter_mod.executeAstWithArena(loop_scope.allocator(), state, body_ast) catch |err| {
-            io.printError("each: body error: {}\n", .{err});
+        // Parse errors are already printed by parseInput with line/column info
+        last_status = interpreter_mod.executeAstWithArena(loop_scope.allocator(), state, body_ast) catch {
             return 1;
         };
 
@@ -292,6 +292,8 @@ fn executeEachStatement(allocator: std.mem.Allocator, state: *State, stmt: expan
 }
 
 /// Expand items_source into a list of strings. Returns null on error.
+/// Empty strings from variable expansion are filtered out so that
+/// `for x in $empty` iterates zero times, not once with empty string.
 fn expandItems(arena_alloc: std.mem.Allocator, state: *State, items_source: []const u8) ?[]const []const u8 {
     var items: std.ArrayListUnmanaged([]const u8) = .empty;
 
@@ -311,6 +313,9 @@ fn expandItems(arena_alloc: std.mem.Allocator, state: *State, items_source: []co
                 return null;
             };
             for (expanded) |word| {
+                // Filter out empty strings - this ensures `for x in $empty` iterates zero times
+                if (word.len == 0) continue;
+
                 items.append(arena_alloc, word) catch |err| {
                     io.printError("each: append error: {}\n", .{err});
                     return null;
@@ -338,8 +343,8 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
     const parse_alloc = parse_arena.allocator();
 
     // Parse body once upfront
-    const body_parsed = interpreter_mod.parseInput(parse_alloc, while_stmt.body) catch |err| {
-        io.printError("while: body parse error: {}\n", .{err});
+    // Parse errors are already printed by parseInput with line/column info
+    const body_parsed = interpreter_mod.parseInput(parse_alloc, while_stmt.body) catch {
         return 1;
     };
 
@@ -369,8 +374,8 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
         if (cond_status != 0) break;
 
         // Execute pre-parsed body using the loop scope's arena
-        last_status = interpreter_mod.executeAstWithArena(loop_scope.allocator(), state, body_parsed) catch |err| {
-            io.printError("while: body error: {}\n", .{err});
+        // Parse errors are already printed by parseInput with line/column info
+        last_status = interpreter_mod.executeAstWithArena(loop_scope.allocator(), state, body_parsed) catch {
             return 1;
         };
 
@@ -553,9 +558,11 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
 fn runDeferredCommandsFromIndex(allocator: std.mem.Allocator, state: *State, from_index: usize) void {
     // Pop and execute in reverse order (LIFO), but only commands added after from_index
     while (state.deferred.items.len > from_index) {
-        const cmd_stmt = state.popDeferred().?;
-        // Execute the pre-parsed simple command directly (no re-parsing needed)
-        _ = executeSimpleCommand(allocator, state, cmd_stmt) catch {};
+        const source = state.popDeferred().?;
+        defer state.freeDeferred(source);
+
+        // Parse and execute the deferred command source
+        _ = interpreter_mod.execute(allocator, state, source) catch {};
     }
 }
 
@@ -586,14 +593,13 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
     };
 
     // Get cached parse or parse on first call, then execute
-    const parsed = func.getParsed() catch |err| {
-        io.printError("function {s}: {}\n", .{ name, err });
+    // Parse errors are already printed by parseInput with line/column info
+    const parsed = func.getParsed() catch {
         state.fn_return = false;
         return 1;
     };
 
-    const status = interpreter_mod.executeAst(allocator, state, parsed) catch |err| {
-        io.printError("function {s}: {}\n", .{ name, err });
+    const status = interpreter_mod.executeAst(allocator, state, parsed) catch {
         state.fn_return = false;
         return 1;
     };
