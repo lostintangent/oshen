@@ -19,7 +19,7 @@ Tests are code we live in, not code that gets stale. So keep the following value
    2. Unit tests can be run on a per-file basis, and therefore, they provide a focused means of validating correctness after making a change.
    3. Oshen's E2E tests (`scripts/e2e.wave`) are written in Oshen itself, and therefore, they provide a means of "dogfooding"/performance testing the system on every change. And since they run in <1s, they provide holistic signal without adding friction to the feedback loop.
 2. For unit tests specifically (see `src/language/lexer.zig` and `src/language/parser.zig` as canonical examples):
-   - Organize tests with section headers and descriptive test names (e.g., `"Category: behavior being tested"`)
+   - Organize tests with section headers (`=` for top-level sections, `-` for subsections) and descriptive test names (e.g., `"Category: behavior being tested"`)
    - Group tests by feature category first, then within each category order: basic → complex → error cases
    - Consolidate related assertions into a single test with inline comments. Don't create a separate test for each minor variation, but also, don't group logically seperate assertions
    - Use table-driven tests with anonymous tuples when testing multiple cases with the same structure
