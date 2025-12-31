@@ -109,12 +109,16 @@ Oshen's interactive mode provides a modern editing experience out of the box—n
 
 Commands, strings, operators, and variables are color-coded as you type:
 
-- **Commands** — Valid commands (builtins, functions, aliases, and executables) shown in bold
-- **Invalid commands** — Unknown commands shown in red
+- **Commands** — Valid commands (builtins, functions, aliases, executables) in green
+- **Invalid commands** — Unknown commands in red
 - **Keywords** — Control flow (`if`, `for`, `while`, etc.) in blue
-- **Strings** — Single and double-quoted strings in green
-- **Variables** — `$var` expansions highlighted in purple
-- **Operators** — Pipes, redirections, and logical operators in cyan
+- **Strings** — Quoted strings in yellow
+- **Numbers** — Numeric literals in yellow
+- **Variables** — `$var` expansions in magenta
+- **Globs** — Patterns like `*.txt` in magenta
+- **Tilde** — Home directory (`~`, `~/path`) in magenta
+- **Operators** — Pipes, redirects, logical, background in cyan
+- **Separators** — `;` and newlines dimmed
 
 Highlighting updates in real-time as you edit, giving instant feedback on syntax errors.
 
@@ -253,7 +257,7 @@ path_prepend MANPATH /opt/homebrew/share/man
 
 The default prompt shows your current directory in green, and if you're in a git repository, the current branch in magenta:
 
-```
+```sh
 ~/projects/oshen (main) #
 ```
 

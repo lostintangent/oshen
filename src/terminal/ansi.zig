@@ -1,8 +1,6 @@
-//! ANSI escape sequences and terminal color utilities
+//! ANSI escape sequences and terminal color utilities.
 //!
 //! Provides color codes, styles, and escape sequence handling for terminal output.
-
-const raw = @import("io/raw.zig");
 
 // =============================================================================
 // Escape Sequence Prefixes
@@ -50,6 +48,8 @@ pub const cursor_save = csi ++ "s";
 pub const cursor_restore = csi ++ "u";
 pub const cursor_hide = dec ++ "25l";
 pub const cursor_show = dec ++ "25h";
+pub const cursor_left = csi ++ "D";
+pub const cursor_right = csi ++ "C";
 
 // =============================================================================
 // Screen/Line Clearing
@@ -90,7 +90,11 @@ pub const focus_off = dec ++ "1004l";
 pub const osc_title_start = osc ++ "0;";
 pub const osc_end = "\x07";
 
-/// Calculate display length of a string, ignoring ANSI escape sequences
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/// Calculate display length of a string, ignoring ANSI escape sequences.
 pub fn displayLength(s: []const u8) usize {
     var len: usize = 0;
     var i: usize = 0;
@@ -108,7 +112,30 @@ pub fn displayLength(s: []const u8) usize {
     return len;
 }
 
-/// Write a string to stdout, interpreting escape sequences.
-/// Delegates to raw.writeEscaped for the shared implementation.
-/// Note: For performance-critical code, prefer Writer.writeEscaped() which buffers output.
-pub const writeEscaped = raw.writeEscaped;
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = @import("std").testing;
+
+test "displayLength: plain text" {
+    try testing.expectEqual(0, displayLength(""));
+    try testing.expectEqual(5, displayLength("hello"));
+    try testing.expectEqual(11, displayLength("hello world"));
+}
+
+test "displayLength: with CSI color codes" {
+    // Green text
+    try testing.expectEqual(5, displayLength(green ++ "hello" ++ reset));
+    // Nested styles
+    try testing.expectEqual(5, displayLength(bold ++ green ++ "hello" ++ reset));
+    // Multiple colored words
+    try testing.expectEqual(11, displayLength(red ++ "hello" ++ reset ++ " " ++ blue ++ "world" ++ reset));
+}
+
+test "displayLength: typical prompt" {
+    // Simulates: green path + magenta branch + plain suffix
+    // "~/code" (6) + " " (1) + "(main)" (6) + " $ " (3) = 16
+    const prompt = green ++ "~/code" ++ reset ++ " " ++ bright_magenta ++ "(main)" ++ reset ++ " $ ";
+    try testing.expectEqual(16, displayLength(prompt));
+}

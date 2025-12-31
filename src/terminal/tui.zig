@@ -1,12 +1,19 @@
 //! TUI primitives: raw mode, input handling, and terminal interaction.
+
 const std = @import("std");
 const posix = std.posix;
+
+const ansi = @import("ansi.zig");
 const io = @import("io.zig");
 
-/// Key codes for special keys
+// =============================================================================
+// Types
+// =============================================================================
+
+/// Input key/event from the terminal.
 pub const Key = union(enum) {
     char: u8,
-    ctrl: u8, // ctrl+letter
+    ctrl: u8,
     up,
     down,
     left,
@@ -19,17 +26,15 @@ pub const Key = union(enum) {
     backspace,
     enter,
     tab,
-    eof, // ctrl+d on empty line
-    // Word movement (ctrl+arrow or alt+arrow)
+    eof,
     word_left,
     word_right,
-    // Line operations
-    kill_line, // ctrl+k
-    kill_word, // ctrl+w
-    clear_screen, // ctrl+l
-    interrupt, // ctrl+c
-    focus_in, // terminal gained focus
-    focus_out, // terminal lost focus
+    kill_line,
+    kill_word,
+    clear_screen,
+    interrupt,
+    focus_in,
+    focus_out,
     escape,
     mouse: MouseEvent,
     unknown,
@@ -38,74 +43,79 @@ pub const Key = union(enum) {
 pub const MouseEvent = struct {
     x: u16,
     y: u16,
-    // We can add buttons later if needed
 };
 
-/// Enable raw mode for the terminal
+// =============================================================================
+// Terminal Mode
+// =============================================================================
+
+/// Enable raw mode for the terminal. Returns original settings for restoration.
 pub fn enableRawMode(fd: posix.fd_t) !posix.termios {
     const orig = try posix.tcgetattr(fd);
     var raw = orig;
 
-    // Input modes: no break, no CR to NL, no parity check, no strip, no flow control
+    // Input: no break, no CR to NL, no parity check, no strip, no flow control
     raw.iflag.BRKINT = false;
     raw.iflag.ICRNL = false;
     raw.iflag.INPCK = false;
     raw.iflag.ISTRIP = false;
     raw.iflag.IXON = false;
 
-    // Output modes: disable post processing
+    // Output: disable post processing
     raw.oflag.OPOST = false;
 
-    // Control modes: set 8 bit chars
+    // Control: 8-bit chars
     raw.cflag.CSIZE = .CS8;
 
-    // Local modes: no echo, no canonical, no extended functions, no signal chars
+    // Local: no echo, no canonical, no extended, no signals
     raw.lflag.ECHO = false;
     raw.lflag.ICANON = false;
     raw.lflag.IEXTEN = false;
     raw.lflag.ISIG = false;
 
-    // Control chars: set read timeout
-    raw.cc[@intFromEnum(posix.V.MIN)] = 1; // Read at least 1 char
-    raw.cc[@intFromEnum(posix.V.TIME)] = 0; // No timeout
+    // Read at least 1 char, no timeout
+    raw.cc[@intFromEnum(posix.V.MIN)] = 1;
+    raw.cc[@intFromEnum(posix.V.TIME)] = 0;
 
     try posix.tcsetattr(fd, .NOW, raw);
     return orig;
 }
 
-/// Restore terminal to original settings
+/// Restore terminal to original settings.
 pub fn restoreTerminal(fd: posix.fd_t, orig: posix.termios) void {
-    // Disable ECHOCTL to prevent ^C or ^[[I from being displayed when restoring
     var cooked = orig;
+    // Disable ECHOCTL to prevent ^C or ^[[I from being displayed
     if (@hasField(@TypeOf(cooked.lflag), "ECHOCTL")) {
         cooked.lflag.ECHOCTL = false;
     }
     posix.tcsetattr(fd, .FLUSH, cooked) catch {};
 }
 
-/// Enable focus reporting
+// =============================================================================
+// Reporting
+// =============================================================================
+
 pub fn enableFocusReporting(fd: posix.fd_t) void {
-    io.writeToFd(fd, "\x1b[?1004h");
+    io.writeToFd(fd, ansi.focus_on);
 }
 
-/// Disable focus reporting
 pub fn disableFocusReporting(fd: posix.fd_t) void {
-    io.writeToFd(fd, "\x1b[?1004l");
+    io.writeToFd(fd, ansi.focus_off);
 }
 
-/// Enable mouse reporting (SGR 1006 mode + basic mouse tracking)
 pub fn enableMouseReporting(fd: posix.fd_t) void {
-    // 1000: Report mouse click
-    // 1006: SGR extended mouse coordinates (avoids encoding issues for x/y > 223)
-    io.writeToFd(fd, "\x1b[?1000;1006h");
+    io.writeToFd(fd, ansi.mouse_on);
 }
 
-/// Disable mouse reporting
 pub fn disableMouseReporting(fd: posix.fd_t) void {
-    io.writeToFd(fd, "\x1b[?1000;1006l");
+    io.writeToFd(fd, ansi.mouse_off);
 }
 
-/// Read a key from the terminal
+// =============================================================================
+// Input
+// =============================================================================
+
+/// Read a key from the terminal.
 pub fn readKey(fd: posix.fd_t) !Key {
     var buf: [1]u8 = undefined;
     const n = try posix.read(fd, &buf);
@@ -113,184 +123,243 @@ pub fn readKey(fd: posix.fd_t) !Key {
 
     const c = buf[0];
 
-    // Ctrl+key
-    if (c < 32) {
-        return switch (c) {
-            0 => .unknown, // ctrl+space
-            1 => .{ .ctrl = 'a' }, // ctrl+a
-            2 => .{ .ctrl = 'b' }, // ctrl+b
-            3 => .interrupt, // ctrl+c
-            4 => .eof, // ctrl+d
-            5 => .{ .ctrl = 'e' }, // ctrl+e
-            6 => .{ .ctrl = 'f' }, // ctrl+f
-            7 => .unknown, // ctrl+g
-            8 => .backspace, // ctrl+h
-            9 => .tab, // tab
-            10, 13 => .enter, // enter (LF or CR)
-            11 => .kill_line, // ctrl+k
-            12 => .clear_screen, // ctrl+l
-            14 => .{ .ctrl = 'n' }, // ctrl+n (down in some terminals)
-            16 => .{ .ctrl = 'p' }, // ctrl+p (up in some terminals)
-            21 => .{ .ctrl = 'u' }, // ctrl+u
-            23 => .kill_word, // ctrl+w
-            27 => readEscapeSequence(fd), // escape
-            else => .unknown,
-        };
-    }
+    // Control characters (0-31)
+    if (c < 32) return controlKey(c) orelse readEscapeSequence(fd);
 
-    if (c == 127) return .backspace; // DEL key
+    // DEL key
+    if (c == 127) return .backspace;
 
     return .{ .char = c };
 }
 
-/// Parse escape sequences.
-fn readEscapeSequence(fd: posix.fd_t) Key {
-    var seq: [32]u8 = undefined;
+/// Map control character to Key.
+fn controlKey(c: u8) ?Key {
+    return switch (c) {
+        0 => .unknown,
+        1 => .{ .ctrl = 'a' },
+        2 => .{ .ctrl = 'b' },
+        3 => .interrupt,
+        4 => .eof,
+        5 => .{ .ctrl = 'e' },
+        6 => .{ .ctrl = 'f' },
+        7 => .unknown,
+        8 => .backspace,
+        9 => .tab,
+        10, 13 => .enter,
+        11 => .kill_line,
+        12 => .clear_screen,
+        14 => .{ .ctrl = 'n' },
+        16 => .{ .ctrl = 'p' },
+        21 => .{ .ctrl = 'u' },
+        23 => .kill_word,
+        27 => null, // ESC - needs further parsing
+        else => .unknown,
+    };
+}
 
-    // Check if there are more bytes available (with a short timeout)
+/// Parse escape sequences (CSI, SS3, Alt+key).
+fn readEscapeSequence(fd: posix.fd_t) Key {
+    const c1 = readByteWithTimeout(fd, 10) orelse return .escape;
+
+    return switch (c1) {
+        '[' => parseCsiSequence(fd),
+        'O' => parseSs3Sequence(fd),
+        'b' => .word_left,
+        'f' => .word_right,
+        else => .unknown,
+    };
+}
+
+/// Parse CSI sequence (ESC [).
+fn parseCsiSequence(fd: posix.fd_t) Key {
+    const c = readByteWithTimeout(fd, 10) orelse return .unknown;
+
+    // Extended sequence (starts with digit or '<')
+    if ((c >= '0' and c <= '9') or c == '<') {
+        return parseExtendedCsi(fd, c);
+    }
+
+    // Simple CSI sequence
+    return switch (c) {
+        'A' => .up,
+        'B' => .down,
+        'C' => .right,
+        'D' => .left,
+        'H' => .home,
+        'F' => .end,
+        'I' => .focus_in,
+        'O' => .focus_out,
+        else => .unknown,
+    };
+}
+
+/// Parse extended CSI sequence (ESC [ <digit/params> <final>).
+fn parseExtendedCsi(fd: posix.fd_t, first: u8) Key {
+    var seq: [32]u8 = undefined;
+    seq[0] = first;
+    var len: usize = 1;
+
+    // Read until final byte (64-126) or buffer full
+    while (len < seq.len) {
+        const c = readByteWithTimeout(fd, 10) orelse break;
+        seq[len] = c;
+        len += 1;
+        if (c >= 64 and c <= 126) break;
+    }
+
+    if (len == 0) return .unknown;
+
+    // Mouse: ESC [ < params M/m
+    if (first == '<') return parseMouseSequence(seq[1..len]);
+
+    // Tilde sequences: ESC [ n ~
+    if (len >= 2 and seq[1] == '~') {
+        return switch (first) {
+            '1', '7' => .home,
+            '3' => .delete,
+            '4', '8' => .end,
+            '5' => .page_up,
+            '6' => .page_down,
+            else => .unknown,
+        };
+    }
+
+    // Modifier sequences: ESC [ 1 ; 5 C (ctrl+right)
+    const final = seq[len - 1];
+    if (final == 'C' or final == 'D') {
+        const slice = seq[0..len];
+        if (std.mem.indexOf(u8, slice, ";5") != null or std.mem.indexOf(u8, slice, ";3") != null) {
+            return if (final == 'C') .word_right else .word_left;
+        }
+    }
+
+    return .unknown;
+}
+
+/// Parse mouse sequence content (after '<', before 'M'/'m').
+fn parseMouseSequence(seq: []const u8) Key {
+    if (seq.len == 0) return .unknown;
+    const final = seq[seq.len - 1];
+    if (final != 'M') return .unknown; // Only handle press, not release
+
+    const content = seq[0 .. seq.len - 1];
+    var iter = std.mem.splitScalar(u8, content, ';');
+
+    const button_str = iter.next() orelse return .unknown;
+    const x_str = iter.next() orelse return .unknown;
+    const y_str = iter.next() orelse return .unknown;
+
+    const button = std.fmt.parseInt(u16, button_str, 10) catch return .unknown;
+    const x = std.fmt.parseInt(u16, x_str, 10) catch return .unknown;
+    const y = std.fmt.parseInt(u16, y_str, 10) catch return .unknown;
+
+    // Button 0 is left click
+    if (button == 0) return .{ .mouse = .{ .x = x, .y = y } };
+
+    return .unknown;
+}
+
+/// Parse SS3 sequence (ESC O).
+fn parseSs3Sequence(fd: posix.fd_t) Key {
+    const c = readByteWithTimeout(fd, 10) orelse return .unknown;
+    return switch (c) {
+        'H' => .home,
+        'F' => .end,
+        else => .unknown,
+    };
+}
+
+/// Read a single byte with timeout (milliseconds). Returns null on timeout or error.
+fn readByteWithTimeout(fd: posix.fd_t, timeout_ms: i32) ?u8 {
     var pfd = [1]posix.pollfd{.{
         .fd = fd,
         .events = posix.POLL.IN,
         .revents = 0,
     }};
 
-    // Wait up to 10ms for the next char
-    const ready = posix.poll(&pfd, 10) catch return .unknown;
-    if (ready == 0) return .escape; // Timeout, just ESC
+    const ready = posix.poll(&pfd, timeout_ms) catch return null;
+    if (ready == 0) return null;
 
-    // Read the next character
-    const n1 = posix.read(fd, seq[0..1]) catch return .unknown;
-    if (n1 == 0) return .unknown;
+    var buf: [1]u8 = undefined;
+    const n = posix.read(fd, &buf) catch return null;
+    if (n == 0) return null;
 
-    if (seq[0] == '[') {
-        // CSI sequence
-        const ready2 = posix.poll(&pfd, 10) catch return .unknown;
-        if (ready2 == 0) return .unknown;
-
-        const n2 = posix.read(fd, seq[1..2]) catch return .unknown;
-        if (n2 == 0) return .unknown;
-
-        if ((seq[1] >= '0' and seq[1] <= '9') or seq[1] == '<') {
-            // Extended sequence like ESC[1;5C or ESC[<0;23;45M (mouse)
-
-            // Read until we hit a letter or tilde, or buffer full
-            var i: usize = 2;
-            while (i < seq.len) {
-                const ready_more = posix.poll(&pfd, 10) catch return .unknown;
-                if (ready_more == 0) break;
-
-                const n_more = posix.read(fd, seq[i .. i + 1]) catch return .unknown;
-                if (n_more == 0) break;
-
-                const c = seq[i];
-                i += 1;
-
-                if (c >= 64 and c <= 126) {
-                    // End of sequence
-                    break;
-                }
-            }
-
-            // Handle mouse: <button>;<x>;<y>M or m
-            if (seq[1] == '<') {
-                // SGR mouse mode: \x1b[<0;10;20M (press) or m (release)
-                // Format: <button>;<px>;<py>[Mm]
-                const last_char = seq[i - 1];
-                // For now, let's just handle "press" (M) on left button (0)
-                if (last_char == 'M') {
-                    // It's a press/move
-                    // Parse contents
-                    const content = seq[2 .. i - 1]; // Skip '<' and 'M'
-
-                    var iter = std.mem.splitScalar(u8, content, ';');
-                    const button_str = iter.next() orelse return .unknown;
-                    const x_str = iter.next() orelse return .unknown;
-                    const y_str = iter.next() orelse return .unknown;
-
-                    const button = std.fmt.parseInt(u16, button_str, 10) catch return .unknown;
-                    const x = std.fmt.parseInt(u16, x_str, 10) catch return .unknown;
-                    const y = std.fmt.parseInt(u16, y_str, 10) catch return .unknown;
-
-                    // Button 0 is left click
-                    if (button == 0) {
-                        return .{ .mouse = .{ .x = x, .y = y } };
-                    }
-                }
-                return .unknown;
-            }
-
-            if (i > 2 and seq[2] == '~') {
-                return switch (seq[1]) {
-                    '1' => .home,
-                    '3' => .delete,
-                    '4' => .end,
-                    '5' => .page_up,
-                    '6' => .page_down,
-                    '7' => .home,
-                    '8' => .end,
-                    else => .unknown,
-                };
-            }
-
-            // Modifier sequences (e.g., ESC[1;5C for ctrl+right)
-            const last_char = seq[i - 1];
-            if (last_char == 'C' or last_char == 'D') {
-                // Check if it contains ";5" or ";3"
-                const slice = seq[0..i];
-                if (std.mem.indexOf(u8, slice, ";5") != null or std.mem.indexOf(u8, slice, ";3") != null) {
-                    return switch (last_char) {
-                        'C' => .word_right,
-                        'D' => .word_left,
-                        else => .unknown,
-                    };
-                }
-            }
-        } else {
-            return switch (seq[1]) {
-                'A' => .up,
-                'B' => .down,
-                'C' => .right,
-                'D' => .left,
-                'H' => .home,
-                'F' => .end,
-                'I' => .focus_in, // Focus in: \x1b[I
-                'O' => .focus_out, // Focus out: \x1b[O
-                else => .unknown,
-            };
-        }
-    } else if (seq[0] == 'O') {
-        // SS3 sequence
-        const ready2 = posix.poll(&pfd, 10) catch return .unknown;
-        if (ready2 == 0) return .unknown;
-
-        const n2 = posix.read(fd, seq[1..2]) catch return .unknown;
-        if (n2 == 0) return .unknown;
-
-        return switch (seq[1]) {
-            'H' => .home,
-            'F' => .end,
-            else => .unknown,
-        };
-    } else if (seq[0] == 'b') {
-        // Alt+b = word left
-        return .word_left;
-    } else if (seq[0] == 'f') {
-        // Alt+f = word right
-        return .word_right;
-    }
-
-    return .unknown;
+    return buf[0];
 }
 
-/// Emit OSC 7 escape sequence to notify terminal of current working directory.
-/// Format: ESC ] 7 ; file://hostname/path BEL
-pub fn emitOsc7(cwd: []const u8) void {
-    // Get hostname
-    var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
-    const hostname = std.posix.gethostname(&hostname_buf) catch "localhost";
+// =============================================================================
+// Terminal Info
+// =============================================================================
 
-    // Build and emit the OSC 7 sequence
+/// Get the current terminal width, or null if unavailable.
+pub fn getTerminalWidth() ?usize {
+    var ws: posix.system.winsize = undefined;
+    const rc = posix.system.ioctl(posix.STDOUT_FILENO, posix.system.T.IOCGWINSZ, @intFromPtr(&ws));
+    if (rc == 0 and ws.col > 0) {
+        return ws.col;
+    }
+    return null;
+}
+
+/// Emit OSC 7 to notify terminal of current working directory.
+pub fn emitOsc7(cwd: []const u8) void {
+    var hostname_buf: [posix.HOST_NAME_MAX]u8 = undefined;
+    const hostname = posix.gethostname(&hostname_buf) catch "localhost";
+
     var buf: [2048]u8 = undefined;
-    const osc = std.fmt.bufPrint(&buf, "\x1b]7;file://{s}{s}\x07", .{ hostname, cwd }) catch return;
-    io.writeStdout(osc);
+    const seq = std.fmt.bufPrint(&buf, "{s}7;file://{s}{s}{s}", .{
+        ansi.osc_title_start[0..2], // Just ESC ]
+        hostname,
+        cwd,
+        ansi.osc_end,
+    }) catch return;
+    io.writeStdout(seq);
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+test "controlKey: basic mappings" {
+    // Special keys
+    try testing.expectEqual(Key.interrupt, controlKey(3).?);
+    try testing.expectEqual(Key.eof, controlKey(4).?);
+    try testing.expectEqual(Key.backspace, controlKey(8).?);
+    try testing.expectEqual(Key.tab, controlKey(9).?);
+    try testing.expectEqual(Key.enter, controlKey(10).?);
+    try testing.expectEqual(Key.enter, controlKey(13).?);
+    try testing.expectEqual(Key.kill_line, controlKey(11).?);
+    try testing.expectEqual(Key.clear_screen, controlKey(12).?);
+    try testing.expectEqual(Key.kill_word, controlKey(23).?);
+
+    // Ctrl+letter
+    try testing.expect(controlKey(1).?.ctrl == 'a');
+    try testing.expect(controlKey(2).?.ctrl == 'b');
+    try testing.expect(controlKey(5).?.ctrl == 'e');
+    try testing.expect(controlKey(6).?.ctrl == 'f');
+
+    // ESC returns null (needs further parsing)
+    try testing.expect(controlKey(27) == null);
+
+    // Unknown
+    try testing.expectEqual(Key.unknown, controlKey(0).?);
+    try testing.expectEqual(Key.unknown, controlKey(7).?);
+}
+
+test "parseMouseSequence: left click" {
+    const result = parseMouseSequence("0;42;10M");
+    try testing.expect(result.mouse.x == 42);
+    try testing.expect(result.mouse.y == 10);
+}
+
+test "parseMouseSequence: release ignored" {
+    const result = parseMouseSequence("0;42;10m");
+    try testing.expectEqual(Key.unknown, result);
+}
+
+test "parseMouseSequence: non-left button ignored" {
+    const result = parseMouseSequence("1;42;10M");
+    try testing.expectEqual(Key.unknown, result);
 }
