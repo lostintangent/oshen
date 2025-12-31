@@ -685,7 +685,7 @@ test "Command substitution: inside double quotes" {
 }
 
 // -----------------------------------------------------------------------------
-// Operators (table-driven)
+// Operators
 // -----------------------------------------------------------------------------
 
 test "Operators: all types tokenize correctly" {

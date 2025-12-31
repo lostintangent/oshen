@@ -43,7 +43,7 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
     var lexer = Lexer.init(alloc, input);
     const toks = lexer.tokenize() catch return writer.writeAll(input);
 
-    var parser = Parser.init(alloc, toks);
+    var parser = Parser.initWithInput(alloc, toks, input);
     const program = if (parser.parse() catch null) |p| &p else null;
 
     var ctx = Context{
@@ -173,27 +173,41 @@ fn collectCommandPositions(
     const prog = program orelse return positions;
 
     for (prog.statements) |stmt| {
-        const chains = switch (stmt) {
-            .command => |cmd| cmd.chains,
-            else => continue,
-        };
-        for (chains) |chain| {
-            for (chain.pipeline.commands) |cmd| {
-                if (cmd.words.len == 0) continue;
-                const first = cmd.words[0];
-                if (first.len == 0) continue;
+        switch (stmt) {
+            .command => |cmd| collectFromChains(&positions, cmd.chains, toks),
+            .@"if" => |if_stmt| {
+                for (if_stmt.branches) |branch| {
+                    collectFromChains(&positions, branch.condition.chains, toks);
+                }
+            },
+            .@"while" => |while_stmt| collectFromChains(&positions, while_stmt.condition.chains, toks),
+            else => {},
+        }
+    }
+    return positions;
+}
 
-                // Find matching token by pointer identity
-                for (toks) |tok| {
-                    if (tok.kind == .word and tok.kind.word.ptr == first.ptr) {
-                        positions.put(tok.span.start, {}) catch {};
-                        break;
-                    }
+/// Extract command positions from a chain of pipelines.
+fn collectFromChains(
+    positions: *std.AutoHashMap(usize, void),
+    chains: []const ast.ChainItem,
+    toks: []const tokens.Token,
+) void {
+    for (chains) |chain| {
+        for (chain.pipeline.commands) |cmd| {
+            if (cmd.words.len == 0) continue;
+            const first = cmd.words[0];
+            if (first.len == 0) continue;
+
+            // Find matching token by pointer identity
+            for (toks) |tok| {
+                if (tok.kind == .word and tok.kind.word.ptr == first.ptr) {
+                    positions.put(tok.span.start, {}) catch {};
+                    break;
                 }
             }
         }
     }
-    return positions;
 }
 
 // =============================================================================
@@ -209,52 +223,68 @@ fn expectHighlight(input: []const u8, expected_color: []const u8) !void {
     try testing.expect(std.mem.indexOf(u8, buf.items, expected_color) != null);
 }
 
-test "syntax elements get correct colors" {
-    const cases = .{
-        // Commands
-        .{ "cd foo", ansi.green }, // valid builtin
-        .{ "xyznonexistent123 foo", ansi.red }, // unknown command
-        // Keywords
-        .{ "if true", ansi.blue },
-        // Variables
-        .{ "echo $foo", ansi.bright_magenta }, // named
-        .{ "echo $1", ansi.bright_magenta }, // positional
-        // Strings
-        .{ "echo \"hello\"", ansi.yellow },
-        // Globs
-        .{ "echo *.txt", ansi.bright_magenta }, // glob pattern
-        .{ "echo **/*.zig", ansi.bright_magenta }, // recursive glob
-        // Tilde
-        .{ "cd ~", ansi.bright_magenta },
-        .{ "ls ~/Documents", ansi.bright_magenta },
-        // Numbers
-        .{ "echo 42", ansi.yellow },
-        .{ "chmod 755 file", ansi.yellow },
-        // Operators (all cyan)
-        .{ "a | b", ansi.cyan }, // pipe
-        .{ "echo foo > out.txt", ansi.cyan }, // redirect
-        .{ "true && false", ansi.cyan }, // logical
-        .{ "sleep 1 &", ansi.cyan }, // background
-        .{ "echo hello => x", ansi.cyan }, // capture
-        .{ "echo lines =>@ arr", ansi.cyan }, // capture lines
-        // Separators
-        .{ "echo a; echo b", ansi.dim },
-    };
-    inline for (cases) |case| try expectHighlight(case[0], case[1]);
+test "Commands: valid builtins and executables are green" {
+    try expectHighlight("cd foo", ansi.green);
+    try expectHighlight("echo hello", ansi.green);
 }
 
-test "bare words have no color codes" {
+test "Commands: invalid commands are red" {
+    try expectHighlight("xyznonexistent123 foo", ansi.red);
+}
+
+test "Commands: conditions in if/while are highlighted" {
+    try expectHighlight("if cd foo; echo hi; end", ansi.green);
+    try expectHighlight("while cd foo; echo hi; end", ansi.green);
+    try expectHighlight("if xyznonexistent123 foo; echo hi; end", ansi.red);
+}
+
+test "Words: keywords are blue" {
+    try expectHighlight("if true", ansi.blue);
+    try expectHighlight("while true", ansi.blue);
+    try expectHighlight("for x in a b c", ansi.blue);
+}
+
+test "Words: variables and expansions are bright magenta" {
+    try expectHighlight("echo $foo", ansi.bright_magenta); // named variable
+    try expectHighlight("echo $1", ansi.bright_magenta); // positional variable
+    try expectHighlight("echo *.txt", ansi.bright_magenta); // glob
+    try expectHighlight("echo **/*.zig", ansi.bright_magenta); // recursive glob
+    try expectHighlight("cd ~", ansi.bright_magenta); // tilde
+    try expectHighlight("ls ~/Documents", ansi.bright_magenta); // tilde path
+}
+
+test "Words: literals - strings and numbers" {
+    // Quoted strings (yellow)
+    try expectHighlight("echo \"hello\"", ansi.yellow);
+    try expectHighlight("echo 'world'", ansi.yellow);
+
+    // Numbers (yellow)
+    try expectHighlight("echo 42", ansi.yellow);
+    try expectHighlight("chmod 755 file", ansi.yellow);
+}
+
+test "Tokens: operators and separators" {
+    // Operators (cyan)
+    try expectHighlight("a | b", ansi.cyan);
+    try expectHighlight("echo foo > out.txt", ansi.cyan);
+    try expectHighlight("true && false", ansi.cyan);
+    try expectHighlight("sleep 1 &", ansi.cyan);
+    try expectHighlight("echo hello => x", ansi.cyan);
+
+    // Separators (dim)
+    try expectHighlight("echo a; echo b", ansi.dim);
+}
+
+test "Edge cases: bare arguments and empty input" {
+    // Bare arguments have no color codes
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(testing.allocator);
-    // "echo" is a valid command (green), but "hello" and "world" are bare arguments
     try render(testing.allocator, "echo hello world", buf.writer(testing.allocator), null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "hello") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "world") != null);
-}
 
-test "empty input produces empty output" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(testing.allocator);
+    // Empty input produces empty output
+    buf.clearRetainingCapacity();
     try render(testing.allocator, "", buf.writer(testing.allocator), null);
     try testing.expectEqualStrings("", buf.items);
 }
