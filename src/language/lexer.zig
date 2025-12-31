@@ -197,49 +197,59 @@ pub const Lexer = struct {
     // Command substitution handling
     // =========================================================================
 
-    /// Reads a command substitution `$(...)` with nested parenthesis matching.
-    /// Assumes we're positioned at the `$` of `$(`.
-    fn readCommandSubstitution(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!void {
-        std.debug.assert(self.peek() == '$');
-        std.debug.assert(self.peekAt(1) == '(');
-
-        try buf.appendSlice(self.allocator, "$(");
-        self.advanceBy(2); // skip `$(`
-
-        try self.readParenContent(buf);
+    /// Flushes pending buffer content as a word part if non-empty.
+    fn flushPendingContent(
+        self: *Lexer,
+        parts: *std.ArrayListUnmanaged(WordPart),
+        buf: *std.ArrayListUnmanaged(u8),
+        quote: QuoteKind,
+    ) error{OutOfMemory}!void {
+        if (buf.items.len > 0) {
+            const content = try self.allocator.dupe(u8, buf.items);
+            try parts.append(self.allocator, .{ .quotes = quote, .text = content });
+            buf.clearRetainingCapacity();
+        }
     }
 
-    /// Reads a bare command substitution `(...)` and normalizes to `$(...)`.
-    /// Assumes we're positioned at the opening `(`.
-    fn readBareCommandSubstitution(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!void {
-        std.debug.assert(self.peek() == '(');
+    /// Reads command substitution `$(...)` or `(...)` and adds as a `.command` word part.
+    /// Flushes any pending buffer content first.
+    fn readCommandPart(
+        self: *Lexer,
+        parts: *std.ArrayListUnmanaged(WordPart),
+        buf: *std.ArrayListUnmanaged(u8),
+        pending_quote: QuoteKind,
+    ) (error{OutOfMemory} || LexError)!void {
+        try self.flushPendingContent(parts, buf, pending_quote);
 
-        // Normalize to $(...) so expander can use the same logic
-        try buf.appendSlice(self.allocator, "$(");
-        self.advance(); // skip `(`
+        // Skip opening: either "$(" or just "("
+        if (self.peek() == '$') self.advanceBy(2) else self.advance();
 
-        try self.readParenContent(buf);
+        // Read command content and add as .command part
+        const cmd_content = try self.readCommandContent();
+        try parts.append(self.allocator, .{ .quotes = .command, .text = cmd_content });
     }
 
-    /// Reads the content inside parentheses with nested paren matching.
-    /// Assumes we're positioned after the opening `(` and `$(` has been written.
-    fn readParenContent(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!void {
+    /// Reads content inside parentheses with nested paren matching.
+    /// Returns the content string (without the surrounding parens).
+    /// Assumes we're positioned after the opening `(`.
+    fn readCommandContent(self: *Lexer) (error{OutOfMemory} || LexError)![]const u8 {
+        const start = self.pos;
         var depth: usize = 1;
+
         while (self.peek()) |ch| {
             switch (ch) {
                 '(' => depth += 1,
                 ')' => {
                     depth -= 1;
                     if (depth == 0) {
-                        try buf.append(self.allocator, ')');
-                        self.advance();
-                        return;
+                        const content = try self.allocator.dupe(u8, self.input[start..self.pos]);
+                        self.advance(); // skip closing )
+                        return content;
                     }
                 },
                 // TODO: Handle escaped parens and quoted strings containing parens
                 else => {},
             }
-            try buf.append(self.allocator, ch);
             self.advance();
         }
         return LexError.UnterminatedCommandSubstitution;
@@ -267,21 +277,34 @@ pub const Lexer = struct {
     }
 
     /// Reads a double-quoted string (with escape processing).
+    /// Command substitutions are split into separate `.command` parts.
     fn readDoubleQuoted(self: *Lexer, parts: *std.ArrayListUnmanaged(WordPart), buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!void {
         self.advance(); // skip opening quote
         buf.clearRetainingCapacity();
+        const start_parts = parts.items.len;
 
         while (self.peek()) |c| {
             switch (c) {
                 '"' => {
                     self.advance(); // skip closing quote
-                    const content = try self.allocator.dupe(u8, buf.items);
-                    try parts.append(self.allocator, .{ .quotes = .double, .text = content });
+                    // Flush any remaining content, or produce empty part if this is a pure ""
+                    if (buf.items.len > 0 or parts.items.len == start_parts) {
+                        const content = try self.allocator.dupe(u8, buf.items);
+                        try parts.append(self.allocator, .{ .quotes = .double, .text = content });
+                    }
                     return;
                 },
                 '\\' => {
                     self.advance();
                     try self.handleDoubleQuotedEscape(buf);
+                },
+                '$' => {
+                    if (self.peekAt(1) == '(') {
+                        try self.readCommandPart(parts, buf, .double);
+                    } else {
+                        try buf.append(self.allocator, c);
+                        self.advance();
+                    }
                 },
                 else => {
                     try buf.append(self.allocator, c);
@@ -294,8 +317,10 @@ pub const Lexer = struct {
 
     /// Reads an unquoted (bare) word segment.
     /// Returns true if any content was read.
+    /// Command substitutions are split into separate `.command` parts.
     fn readBareWord(self: *Lexer, parts: *std.ArrayListUnmanaged(WordPart), buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!bool {
         buf.clearRetainingCapacity();
+        const start_parts = parts.items.len;
 
         while (self.peek()) |c| {
             // Stop at word breaks and operators
@@ -310,15 +335,14 @@ pub const Lexer = struct {
                 '"', '\'' => break, // Quote starts new segment
                 '$' => {
                     if (self.peekAt(1) == '(') {
-                        try self.readCommandSubstitution(buf);
+                        try self.readCommandPart(parts, buf, .none);
                     } else {
                         try buf.append(self.allocator, c);
                         self.advance();
                     }
                 },
                 '(' => {
-                    // Bare paren command substitution: (cmd) → normalized to $(cmd)
-                    try self.readBareCommandSubstitution(buf);
+                    try self.readCommandPart(parts, buf, .none);
                 },
                 else => {
                     try buf.append(self.allocator, c);
@@ -327,12 +351,14 @@ pub const Lexer = struct {
             }
         }
 
+        // Flush any remaining content as a .none part
         if (buf.items.len > 0) {
             const content = try self.allocator.dupe(u8, buf.items);
             try parts.append(self.allocator, .{ .quotes = .none, .text = content });
-            return true;
         }
-        return false;
+
+        // Return true if we added any parts
+        return parts.items.len > start_parts;
     }
 
     /// Reads a complete word token (may contain multiple quoted/unquoted segments).
@@ -410,13 +436,23 @@ const TestContext = struct {
         try testing.expectError(expected, lex.tokenize());
     }
 
-    /// Asserts that a word token has a single bare segment with the expected text.
-    fn expectBareWord(segs: []const WordPart, expected: []const u8) !void {
-        if (segs.len == 1 and segs[0].quotes == .none) {
+    /// Asserts that a word token has a single segment with the expected quote kind and text.
+    fn expectWord(segs: []const WordPart, quote: QuoteKind, expected: []const u8) !void {
+        if (segs.len == 1 and segs[0].quotes == quote) {
             try testing.expectEqualStrings(expected, segs[0].text);
             return;
         }
         return error.TestExpectedEqual;
+    }
+
+    /// Asserts that a word token has a single bare segment with the expected text.
+    fn expectBareWord(segs: []const WordPart, expected: []const u8) !void {
+        return expectWord(segs, .none, expected);
+    }
+
+    /// Asserts that a word token has a single command substitution segment with the expected text.
+    fn expectCommandWord(segs: []const WordPart, expected: []const u8) !void {
+        return expectWord(segs, .command, expected);
     }
 };
 
@@ -528,45 +564,75 @@ test "Escapes: bare words preserve backslash for expander" {
 // Command Substitution
 // -----------------------------------------------------------------------------
 
-test "Command substitution: $() and bare () forms" {
+test "Command substitution: $() and bare () forms produce .command parts" {
     var ctx = TestContext.init();
     defer ctx.deinit();
 
-    // $() syntax
+    // $() syntax - produces .command part with just the command (no wrapper)
     const dollar = try ctx.tokenize("echo $(whoami)");
     try testing.expectEqual(@as(usize, 2), dollar.len);
-    try TestContext.expectBareWord(dollar[1].kind.word, "$(whoami)");
+    try TestContext.expectCommandWord(dollar[1].kind.word, "whoami");
 
-    // Bare () gets normalized to $()
+    // Bare () also produces .command part
     const bare = try ctx.tokenize("echo (whoami)");
     try testing.expectEqual(@as(usize, 2), bare.len);
-    try TestContext.expectBareWord(bare[1].kind.word, "$(whoami)");
+    try TestContext.expectCommandWord(bare[1].kind.word, "whoami");
 }
 
-test "Command substitution: nested and with pipes" {
+test "Command substitution: nested substitutions" {
     var ctx = TestContext.init();
     defer ctx.deinit();
 
-    // Nested substitution
+    // Nested substitution - outer is .command, inner stays as text for re-lexing
     const nested = try ctx.tokenize("echo $(dirname $(pwd))");
-    try TestContext.expectBareWord(nested[1].kind.word, "$(dirname $(pwd))");
+    try TestContext.expectCommandWord(nested[1].kind.word, "dirname $(pwd)");
 
     // Bare parens nested
     const bareNested = try ctx.tokenize("echo (dirname (pwd))");
-    try TestContext.expectBareWord(bareNested[1].kind.word, "$(dirname (pwd))");
+    try TestContext.expectCommandWord(bareNested[1].kind.word, "dirname (pwd)");
 
     // Pipe inside parens stays inside
     const withPipe = try ctx.tokenize("echo (ls | head)");
-    try TestContext.expectBareWord(withPipe[1].kind.word, "$(ls | head)");
+    try TestContext.expectCommandWord(withPipe[1].kind.word, "ls | head");
 }
 
-test "Command substitution: concatenation with text" {
+test "Command substitution: concatenation splits into multiple parts" {
     var ctx = TestContext.init();
     defer ctx.deinit();
 
+    // file_(date).txt becomes 3 parts: "file_" + cmdsub("date") + ".txt"
     const tokens = try ctx.tokenize("file_(date).txt");
     try testing.expectEqual(@as(usize, 1), tokens.len);
-    try TestContext.expectBareWord(tokens[0].kind.word, "file_$(date).txt");
+    const parts = tokens[0].kind.word;
+    try testing.expectEqual(@as(usize, 3), parts.len);
+    try testing.expectEqual(QuoteKind.none, parts[0].quotes);
+    try testing.expectEqualStrings("file_", parts[0].text);
+    try testing.expectEqual(QuoteKind.command, parts[1].quotes);
+    try testing.expectEqualStrings("date", parts[1].text);
+    try testing.expectEqual(QuoteKind.none, parts[2].quotes);
+    try testing.expectEqualStrings(".txt", parts[2].text);
+}
+
+test "Command substitution: inside double quotes" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    // "hello $(cmd) world" splits into: .double "hello ", .command "cmd", .double " world"
+    const tokens = try ctx.tokenize("echo \"hello $(whoami) there\"");
+    try testing.expectEqual(@as(usize, 2), tokens.len);
+    const parts = tokens[1].kind.word;
+    try testing.expectEqual(@as(usize, 3), parts.len);
+    try testing.expectEqual(QuoteKind.double, parts[0].quotes);
+    try testing.expectEqualStrings("hello ", parts[0].text);
+    try testing.expectEqual(QuoteKind.command, parts[1].quotes);
+    try testing.expectEqualStrings("whoami", parts[1].text);
+    try testing.expectEqual(QuoteKind.double, parts[2].quotes);
+    try testing.expectEqualStrings(" there", parts[2].text);
+
+    // Bare () inside double quotes is NOT command substitution (literal)
+    const literal = try ctx.tokenize("echo \"hello (world)\"");
+    try testing.expectEqual(@as(usize, 2), literal.len);
+    try TestContext.expectWord(literal[1].kind.word, .double, "hello (world)");
 }
 
 // -----------------------------------------------------------------------------

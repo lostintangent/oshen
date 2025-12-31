@@ -22,13 +22,15 @@ const std = @import("std");
 
 /// Indicates how a word segment was quoted in the source.
 /// Used by the expander to determine which expansions apply:
-/// - `none`: bare word, all expansions apply
-/// - `double`: double-quoted, variable/command expansion only
+/// - `none`: bare word, all expansions apply (variables, globs, escapes)
+/// - `double`: double-quoted, variable expansion only (no globs)
 /// - `single`: single-quoted, no expansion (literal)
+/// - `command`: command substitution $(...) or (...), executed and result expanded
 pub const QuoteKind = enum {
     none,
     double,
     single,
+    command,
 };
 
 /// A segment of a word with its quoting context.

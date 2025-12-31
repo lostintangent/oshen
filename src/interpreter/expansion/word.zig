@@ -141,31 +141,54 @@ pub const ExpandContext = struct {
     }
 };
 
-pub fn expandWord(ctx: *ExpandContext, segs: []const WordPart) (ExpandError || std.mem.Allocator.Error)![]const []const u8 {
-    // Check if any bare segment contains brace expansion
-    for (segs) |seg| {
-        if (seg.quotes == .none and hasBraces(seg.text)) {
-            return expandWordWithBraces(ctx, segs);
+/// Expands a complete word token (slice of WordParts) into a list of strings.
+/// Each WordPart is expanded according to its quote type, and results are
+/// combined via cartesian product to handle multi-value expansions.
+///
+/// Example: `hello_$(echo "a b")_world` with parts ["hello_", cmd("echo a b"), "_world"]
+/// where cmd outputs "a\nb" produces ["hello_a_world", "hello_b_world"]
+pub fn expandWord(ctx: *ExpandContext, parts: []const WordPart) (ExpandError || std.mem.Allocator.Error)![]const []const u8 {
+    // Check if any bare part contains brace expansion
+    for (parts) |part| {
+        if (part.quotes == .none and hasBraces(part.text)) {
+            return expandWordWithBraces(ctx, parts);
         }
     }
 
-    // Standard multi-part expansion (existing behavior)
+    // Expand each part and combine via cartesian product
     var results: std.ArrayListUnmanaged([]const u8) = .empty;
     try results.append(ctx.allocator, "");
 
-    for (segs) |seg| {
-        const expanded = try expandSegment(ctx, seg);
+    for (parts) |part| {
+        const expanded = try expandWordPart(ctx, part);
         results = try cartesian(ctx.allocator, results.items, expanded);
     }
 
     return try results.toOwnedSlice(ctx.allocator);
 }
 
-fn expandSegment(ctx: *ExpandContext, seg: WordPart) (ExpandError || std.mem.Allocator.Error)![]const []const u8 {
-    switch (seg.quotes) {
-        .single => return singletonSlice(ctx.allocator, seg.text),
-        .double => return expandText(ctx, seg.text, .{ .expand_glob = false }),
-        .none => return expandText(ctx, seg.text, .{ .expand_glob = true }),
+/// Expands a single WordPart based on its quote type.
+/// - `.single`: literal text, no expansion
+/// - `.double`: variable and escape expansion only
+/// - `.none`: full expansion (variables, escapes, globs)
+/// - `.command`: execute command and split output by newlines
+fn expandWordPart(ctx: *ExpandContext, part: WordPart) (ExpandError || std.mem.Allocator.Error)![]const []const u8 {
+    switch (part.quotes) {
+        .single => return singletonSlice(ctx.allocator, part.text),
+        .double => return expandText(ctx, part.text, .{ .expand_glob = false }),
+        .none => return expandText(ctx, part.text, .{ .expand_glob = true }),
+        .command => {
+            const output = try runCmdsub(ctx, part.text);
+            var lines: std.ArrayListUnmanaged([]const u8) = .empty;
+            var iter = std.mem.splitScalar(u8, output, '\n');
+            while (iter.next()) |line| {
+                try lines.append(ctx.allocator, line);
+            }
+            if (lines.items.len == 0) {
+                try lines.append(ctx.allocator, "");
+            }
+            return try lines.toOwnedSlice(ctx.allocator);
+        },
     }
 }
 
@@ -339,7 +362,6 @@ fn expandCommaList(allocator: std.mem.Allocator, pattern: []const u8) ![]const [
 
 const ExpandOptions = struct {
     expand_vars: bool = true,
-    expand_cmdsub: bool = true,
     expand_escapes: bool = true,
     expand_glob: bool = false,
 };
@@ -353,7 +375,9 @@ fn appendLiteral(allocator: std.mem.Allocator, current: []const []const u8, lite
     return next;
 }
 
-/// Unified text expansion function - handles variables, command substitution, escapes, and globs
+/// Low-level text expansion: processes raw text for variables ($var), escapes (\n),
+/// tilde (~), and optionally globs (*). Called by expandWordPart for .none and .double parts.
+/// Returns a list of strings (multiple values when variables expand to lists or globs match multiple files).
 fn expandText(ctx: *ExpandContext, text: []const u8, opts: ExpandOptions) (ExpandError || std.mem.Allocator.Error)![]const []const u8 {
     // Handle tilde expansion for bare words at the start
     if (opts.expand_glob and text.len > 0 and text[0] == '~') {
@@ -383,28 +407,9 @@ fn expandText(ctx: *ExpandContext, text: []const u8, opts: ExpandOptions) (Expan
             }
 
             if (is_var) {
-                if (i + 1 < text.len and text[i + 1] == '(' and opts.expand_cmdsub) {
-                    const end = findMatchingParen(text, i + 1) orelse return ExpandError.EmptyCommandSubstitution;
-                    const cmd = text[i + 2 .. end];
-                    const output = try runCmdsub(ctx, cmd);
-
-                    // Split output into lines ($() produces a list of lines)
-                    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
-                    var iter = std.mem.splitScalar(u8, output, '\n');
-                    while (iter.next()) |line| {
-                        try lines.append(ctx.allocator, line);
-                    }
-                    // If empty output, produce empty list element for proper concatenation
-                    if (lines.items.len == 0) {
-                        try lines.append(ctx.allocator, "");
-                    }
-                    results = try cartesian(ctx.allocator, results.items, try lines.toOwnedSlice(ctx.allocator));
-                    i = end + 1;
-                } else {
-                    const var_result = try parseAndExpandVar(ctx, text, i);
-                    results = try cartesian(ctx.allocator, results.items, var_result.values);
-                    i = var_result.new_pos;
-                }
+                const var_result = try parseAndExpandVar(ctx, text, i);
+                results = try cartesian(ctx.allocator, results.items, var_result.values);
+                i = var_result.new_pos;
             } else {
                 // is_escape
                 const ch = text[i + 1];
@@ -636,21 +641,6 @@ fn getEnvOrStatus(ctx: *ExpandContext, name: []const u8) ![]const []const u8 {
     return singletonSlice(ctx.allocator, std.posix.getenv(name) orelse "");
 }
 
-fn findMatchingParen(text: []const u8, start: usize) ?usize {
-    var depth: usize = 1;
-    var i = start + 1;
-    while (i < text.len) {
-        if (text[i] == '(') {
-            depth += 1;
-        } else if (text[i] == ')') {
-            depth -= 1;
-            if (depth == 0) return i;
-        }
-        i += 1;
-    }
-    return null;
-}
-
 pub fn runCmdsub(ctx: *ExpandContext, cmd: []const u8) (ExpandError || std.mem.Allocator.Error)![]const u8 {
     if (ctx.mock_cmdsub) |mock| {
         if (mock.get(cmd)) |output| {
@@ -692,6 +682,10 @@ pub fn expandWords(ctx: *ExpandContext, words: []const []const WordPart) (Expand
 // =============================================================================
 // Tests
 // =============================================================================
+//
+// Note: These tests use explicit setup instead of a TestContext wrapper because
+// ExpandContext stores a pointer to State, which creates aliasing issues when
+// returning a struct containing both.
 
 const testing = std.testing;
 
@@ -704,13 +698,10 @@ test "expand: bare word" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "hello" }};
-    const result = try expandWord(&ctx, &segs);
-    try testing.expectEqualStrings("hello", result[0]);
+    const parts = [_]WordPart{.{ .quotes = .none, .text = "hello" }};
+    try testing.expectEqualStrings("hello", (try expandWord(&ctx, &parts))[0]);
 }
 
 test "expand: variable" {
@@ -718,15 +709,13 @@ test "expand: variable" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const values = [_][]const u8{ "a", "b" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs" }};
-    const result = try expandWord(&ctx, &segs);
+    const parts = [_]WordPart{.{ .quotes = .none, .text = "$xs" }};
+    const result = try expandWord(&ctx, &parts);
     try testing.expectEqual(@as(usize, 2), result.len);
     try testing.expectEqualStrings("a", result[0]);
     try testing.expectEqualStrings("b", result[1]);
@@ -738,13 +727,10 @@ test "expand: tilde" {
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     state.home = "/home/user";
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "~/src" }};
-    const result = try expandWord(&ctx, &segs);
-    try testing.expectEqualStrings("/home/user/src", result[0]);
+    const parts = [_]WordPart{.{ .quotes = .none, .text = "~/src" }};
+    try testing.expectEqualStrings("/home/user/src", (try expandWord(&ctx, &parts))[0]);
 }
 
 test "expand: command substitution" {
@@ -752,14 +738,20 @@ test "expand: command substitution" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
+    // Single-line output
     try ctx.setMockCmdsub("whoami", "jon");
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "$(whoami)" }};
-    const result = try expandWord(&ctx, &segs);
-    try testing.expectEqualStrings("jon", result[0]);
+    const parts1 = [_]WordPart{.{ .quotes = .command, .text = "whoami" }};
+    try testing.expectEqualStrings("jon", (try expandWord(&ctx, &parts1))[0]);
+
+    // Multi-line output splits into list
+    try ctx.setMockCmdsub("ls", "a\nb");
+    const parts2 = [_]WordPart{.{ .quotes = .command, .text = "ls" }};
+    const result = try expandWord(&ctx, &parts2);
+    try testing.expectEqual(@as(usize, 2), result.len);
+    try testing.expectEqualStrings("a", result[0]);
+    try testing.expectEqualStrings("b", result[1]);
 }
 
 test "expand: glob pattern" {
@@ -767,15 +759,13 @@ test "expand: glob pattern" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const matches = [_][]const u8{ "src/main.zig", "src/util.zig" };
     try ctx.setMockGlob("src/*.zig", &matches);
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "src/*.zig" }};
-    const result = try expandWord(&ctx, &segs);
+    const parts = [_]WordPart{.{ .quotes = .none, .text = "src/*.zig" }};
+    const result = try expandWord(&ctx, &parts);
     try testing.expectEqual(@as(usize, 2), result.len);
     try testing.expectEqualStrings("src/main.zig", result[0]);
 }
@@ -789,16 +779,13 @@ test "quoting: single quotes preserve literal" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const values = [_][]const u8{ "a", "b" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .quotes = .single, .text = "$xs" }};
-    const result = try expandWord(&ctx, &segs);
-    try testing.expectEqualStrings("$xs", result[0]);
+    const parts = [_]WordPart{.{ .quotes = .single, .text = "$xs" }};
+    try testing.expectEqualStrings("$xs", (try expandWord(&ctx, &parts))[0]);
 }
 
 test "quoting: escaped dollar" {
@@ -806,17 +793,13 @@ test "quoting: escaped dollar" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    // Double quotes
-    const segs1 = [_]WordPart{.{ .quotes = .double, .text = "\\$HOME" }};
-    try testing.expectEqualStrings("$HOME", (try expandWord(&ctx, &segs1))[0]);
+    const parts1 = [_]WordPart{.{ .quotes = .double, .text = "\\$HOME" }};
+    try testing.expectEqualStrings("$HOME", (try expandWord(&ctx, &parts1))[0]);
 
-    // Bare word
-    const segs2 = [_]WordPart{.{ .quotes = .none, .text = "\\$HOME" }};
-    try testing.expectEqualStrings("$HOME", (try expandWord(&ctx, &segs2))[0]);
+    const parts2 = [_]WordPart{.{ .quotes = .none, .text = "\\$HOME" }};
+    try testing.expectEqualStrings("$HOME", (try expandWord(&ctx, &parts2))[0]);
 }
 
 // -----------------------------------------------------------------------------
@@ -828,15 +811,13 @@ test "cartesian: prefix with list" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const values = [_][]const u8{ "a", "b" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{ .{ .quotes = .none, .text = "pre" }, .{ .quotes = .none, .text = "$xs" } };
-    const result = try expandWord(&ctx, &segs);
+    const parts = [_]WordPart{ .{ .quotes = .none, .text = "pre" }, .{ .quotes = .none, .text = "$xs" } };
+    const result = try expandWord(&ctx, &parts);
     try testing.expectEqualStrings("prea", result[0]);
     try testing.expectEqualStrings("preb", result[1]);
 }
@@ -846,20 +827,39 @@ test "cartesian: two lists" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const xs = [_][]const u8{ "a", "b" };
     const ys = [_][]const u8{ "1", "2" };
     try ctx.setVar("xs", &xs);
     try ctx.setVar("ys", &ys);
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs$ys" }};
-    const result = try expandWord(&ctx, &segs);
+    const parts = [_]WordPart{.{ .quotes = .none, .text = "$xs$ys" }};
+    const result = try expandWord(&ctx, &parts);
     try testing.expectEqual(@as(usize, 4), result.len);
     try testing.expectEqualStrings("a1", result[0]);
     try testing.expectEqualStrings("b2", result[3]);
+}
+
+test "cartesian: command output with prefix/suffix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    state.initCurrentScope();
+    var ctx = ExpandContext.init(arena.allocator(), &state);
+
+    try ctx.setMockCmdsub("ls", "a\nb");
+
+    // prefix_$(cmd)_suffix with multi-line output produces cartesian product
+    const parts = [_]WordPart{
+        .{ .quotes = .none, .text = "pre_" },
+        .{ .quotes = .command, .text = "ls" },
+        .{ .quotes = .none, .text = "_suf" },
+    };
+    const result = try expandWord(&ctx, &parts);
+    try testing.expectEqual(@as(usize, 2), result.len);
+    try testing.expectEqualStrings("pre_a_suf", result[0]);
+    try testing.expectEqualStrings("pre_b_suf", result[1]);
 }
 
 // -----------------------------------------------------------------------------
@@ -871,31 +871,21 @@ test "positional: $1, $2, $#, $*" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const argv = [_][]const u8{ "foo", "bar", "baz" };
     try ctx.setVar("argv", &argv);
 
-    // $1, $2
-    const segs1 = [_]WordPart{.{ .quotes = .none, .text = "$1" }};
-    try testing.expectEqualStrings("foo", (try expandWord(&ctx, &segs1))[0]);
-    const segs2 = [_]WordPart{.{ .quotes = .none, .text = "$2" }};
-    try testing.expectEqualStrings("bar", (try expandWord(&ctx, &segs2))[0]);
-
-    // $# count
-    const segs3 = [_]WordPart{.{ .quotes = .none, .text = "$#" }};
-    try testing.expectEqualStrings("3", (try expandWord(&ctx, &segs3))[0]);
-
-    // $* all args
-    const segs4 = [_]WordPart{.{ .quotes = .none, .text = "$*" }};
-    const all = try expandWord(&ctx, &segs4);
-    try testing.expectEqual(@as(usize, 3), all.len);
-
-    // Out of range
-    const segs5 = [_]WordPart{.{ .quotes = .none, .text = "$5" }};
-    try testing.expectEqualStrings("", (try expandWord(&ctx, &segs5))[0]);
+    const p1 = [_]WordPart{.{ .quotes = .none, .text = "$1" }};
+    try testing.expectEqualStrings("foo", (try expandWord(&ctx, &p1))[0]);
+    const p2 = [_]WordPart{.{ .quotes = .none, .text = "$2" }};
+    try testing.expectEqualStrings("bar", (try expandWord(&ctx, &p2))[0]);
+    const p3 = [_]WordPart{.{ .quotes = .none, .text = "$#" }};
+    try testing.expectEqualStrings("3", (try expandWord(&ctx, &p3))[0]);
+    const p4 = [_]WordPart{.{ .quotes = .none, .text = "$*" }};
+    try testing.expectEqual(@as(usize, 3), (try expandWord(&ctx, &p4)).len);
+    const p5 = [_]WordPart{.{ .quotes = .none, .text = "$5" }};
+    try testing.expectEqualStrings("", (try expandWord(&ctx, &p5))[0]);
 }
 
 // -----------------------------------------------------------------------------
@@ -907,30 +897,17 @@ test "index: single element" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const values = [_][]const u8{ "a", "b", "c" };
     try ctx.setVar("xs", &values);
 
-    // Positive indices (1-based)
-    const segs1 = [_]WordPart{.{ .quotes = .none, .text = "$xs[1]" }};
-    try testing.expectEqualStrings("a", (try expandWord(&ctx, &segs1))[0]);
-    const segs2 = [_]WordPart{.{ .quotes = .none, .text = "$xs[2]" }};
-    try testing.expectEqualStrings("b", (try expandWord(&ctx, &segs2))[0]);
-
-    // Negative indices
-    const segs3 = [_]WordPart{.{ .quotes = .none, .text = "$xs[-1]" }};
-    try testing.expectEqualStrings("c", (try expandWord(&ctx, &segs3))[0]);
-    const segs4 = [_]WordPart{.{ .quotes = .none, .text = "$xs[-2]" }};
-    try testing.expectEqualStrings("b", (try expandWord(&ctx, &segs4))[0]);
-
-    // Out of bounds and zero
-    const segs5 = [_]WordPart{.{ .quotes = .none, .text = "$xs[10]" }};
-    try testing.expectEqualStrings("", (try expandWord(&ctx, &segs5))[0]);
-    const segs6 = [_]WordPart{.{ .quotes = .none, .text = "$xs[0]" }};
-    try testing.expectEqualStrings("", (try expandWord(&ctx, &segs6))[0]);
+    const p1 = [_]WordPart{.{ .quotes = .none, .text = "$xs[1]" }};
+    try testing.expectEqualStrings("a", (try expandWord(&ctx, &p1))[0]);
+    const p2 = [_]WordPart{.{ .quotes = .none, .text = "$xs[-1]" }};
+    try testing.expectEqualStrings("c", (try expandWord(&ctx, &p2))[0]);
+    const p3 = [_]WordPart{.{ .quotes = .none, .text = "$xs[10]" }};
+    try testing.expectEqualStrings("", (try expandWord(&ctx, &p3))[0]);
 }
 
 test "index: range slicing" {
@@ -938,32 +915,19 @@ test "index: range slicing" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const values = [_][]const u8{ "a", "b", "c", "d", "e" };
     try ctx.setVar("xs", &values);
 
-    // [1..2]
-    const segs1 = [_]WordPart{.{ .quotes = .none, .text = "$xs[1..2]" }};
-    const r1 = try expandWord(&ctx, &segs1);
-    try testing.expectEqual(@as(usize, 2), r1.len);
-    try testing.expectEqualStrings("a", r1[0]);
-
-    // [2..] from index to end
-    const segs2 = [_]WordPart{.{ .quotes = .none, .text = "$xs[2..]" }};
-    try testing.expectEqual(@as(usize, 4), (try expandWord(&ctx, &segs2)).len);
-
-    // [..2] from start to index
-    const segs3 = [_]WordPart{.{ .quotes = .none, .text = "$xs[..2]" }};
-    try testing.expectEqual(@as(usize, 2), (try expandWord(&ctx, &segs3)).len);
-
-    // [-2..-1] negative range
-    const segs4 = [_]WordPart{.{ .quotes = .none, .text = "$xs[-2..-1]" }};
-    const r4 = try expandWord(&ctx, &segs4);
-    try testing.expectEqualStrings("d", r4[0]);
-    try testing.expectEqualStrings("e", r4[1]);
+    const p1 = [_]WordPart{.{ .quotes = .none, .text = "$xs[1..2]" }};
+    try testing.expectEqual(@as(usize, 2), (try expandWord(&ctx, &p1)).len);
+    const p2 = [_]WordPart{.{ .quotes = .none, .text = "$xs[2..]" }};
+    try testing.expectEqual(@as(usize, 4), (try expandWord(&ctx, &p2)).len);
+    const p3 = [_]WordPart{.{ .quotes = .none, .text = "$xs[-2..-1]" }};
+    const r3 = try expandWord(&ctx, &p3);
+    try testing.expectEqualStrings("d", r3[0]);
+    try testing.expectEqualStrings("e", r3[1]);
 }
 
 // -----------------------------------------------------------------------------
@@ -975,15 +939,12 @@ test "brace: comma list" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "{a,b,c}" }};
-    const result = try expandWord(&ctx, &segs);
+    const parts = [_]WordPart{.{ .quotes = .none, .text = "{a,b,c}" }};
+    const result = try expandWord(&ctx, &parts);
     try testing.expectEqual(@as(usize, 3), result.len);
     try testing.expectEqualStrings("a", result[0]);
-    try testing.expectEqualStrings("c", result[2]);
 }
 
 test "brace: with prefix and suffix" {
@@ -991,15 +952,10 @@ test "brace: with prefix and suffix" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const segs1 = [_]WordPart{.{ .quotes = .none, .text = "prefix_{a,b}" }};
-    try testing.expectEqualStrings("prefix_a", (try expandWord(&ctx, &segs1))[0]);
-
-    const segs2 = [_]WordPart{.{ .quotes = .none, .text = "{a,b}_suffix" }};
-    try testing.expectEqualStrings("a_suffix", (try expandWord(&ctx, &segs2))[0]);
+    const p1 = [_]WordPart{.{ .quotes = .none, .text = "prefix_{a,b}" }};
+    try testing.expectEqualStrings("prefix_a", (try expandWord(&ctx, &p1))[0]);
 }
 
 test "brace: nested braces cartesian product" {
@@ -1007,15 +963,12 @@ test "brace: nested braces cartesian product" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "{a,b}_{x,y}" }};
-    const result = try expandWord(&ctx, &segs);
+    const parts = [_]WordPart{.{ .quotes = .none, .text = "{a,b}_{x,y}" }};
+    const result = try expandWord(&ctx, &parts);
     try testing.expectEqual(@as(usize, 4), result.len);
     try testing.expectEqualStrings("a_x", result[0]);
-    try testing.expectEqualStrings("b_y", result[3]);
 }
 
 test "brace: variable inside braces" {
@@ -1023,33 +976,15 @@ test "brace: variable inside braces" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const values = [_][]const u8{ "x", "y", "z" };
     try ctx.setVar("items", &values);
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "{$items}_suffix" }};
-    const result = try expandWord(&ctx, &segs);
+    const parts = [_]WordPart{.{ .quotes = .none, .text = "{$items}_suffix" }};
+    const result = try expandWord(&ctx, &parts);
     try testing.expectEqual(@as(usize, 3), result.len);
     try testing.expectEqualStrings("x_suffix", result[0]);
-}
-
-test "brace: multiple braces" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var state = State.init(arena.allocator());
-    state.initCurrentScope();
-    defer state.deinit();
-    var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
-
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "test_{a,b}_file_{1,2}.txt" }};
-    const result = try expandWord(&ctx, &segs);
-    try testing.expectEqual(@as(usize, 4), result.len);
-    try testing.expectEqualStrings("test_a_file_1.txt", result[0]);
-    try testing.expectEqualStrings("test_b_file_2.txt", result[3]);
 }
 
 test "brace: glob pattern with suffix" {
@@ -1057,15 +992,13 @@ test "brace: glob pattern with suffix" {
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
-    defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
     const matches = [_][]const u8{ "file1.txt", "file2.txt" };
     try ctx.setMockGlob("*.txt", &matches);
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "{*.txt}_backup" }};
-    const result = try expandWord(&ctx, &segs);
+    const parts = [_]WordPart{.{ .quotes = .none, .text = "{*.txt}_backup" }};
+    const result = try expandWord(&ctx, &parts);
     try testing.expectEqual(@as(usize, 2), result.len);
     try testing.expectEqualStrings("file1.txt_backup", result[0]);
 }

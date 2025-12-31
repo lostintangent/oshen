@@ -51,7 +51,7 @@ Control flow bodies are stored as source strings, not sub-ASTs. Parsed on first 
 
 ### Lexer (`language/lexer.zig`)
 
-Text to tokens. Recognizes operators, quoted strings, separators, comments.
+Raw text to tokens. Recognizes operators (`>`, `|`, etc.), quoted strings, command substition, separators (`;`, `\n`), and comments.
 
 **What it doesn't do:** Expand variables, evaluate globs, interpret tildes. These pass through as literal text. This keeps the lexer simple and enables quote-aware expansion later.
 
