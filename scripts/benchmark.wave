@@ -1,28 +1,11 @@
 #!./zig-out/bin/oshen
 
-var DIR (pwd)/scripts/benchmarks
+var BENCH_PREFIX (pwd)/scripts/benchmarks/script
 
-print -n --dim "Building Oshen..."
 zig build -Doptimize=ReleaseFast
-terminal clear
 
-var OSHEN ./zig-out/bin/oshen
-var shells zsh fish elvish
-
-print -n --yellow "⏳ oshen"
-time -p $OSHEN $DIR/script.oshen => timing
-terminal clear
-print --green oshen
-print $timing --nl
-
-each shell in $shells
-    # Skip if shell isn't installed
-    type $shell > /dev/null 2>&1 || continue
-
-    print -n --yellow "⏳ $shell"
-    time -p $shell $DIR/script.$shell => timing
-    terminal clear
-    
-    print --green $shell
-    print $timing --nl
-end
+hyperfine --warmup 3 --runs 10 -N \
+    -n oshen "./zig-out/bin/oshen $BENCH_PREFIX.oshen" \
+    -n zsh "zsh $BENCH_PREFIX.zsh" \
+    -n fish "fish $BENCH_PREFIX.fish" \
+    -n elvish "elvish $BENCH_PREFIX.elvish"

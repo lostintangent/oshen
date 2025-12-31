@@ -160,7 +160,11 @@ pub const Lexer = struct {
     // =========================================================================
 
     /// Handles escape sequences in double-quoted strings.
-    /// Processes the character after a backslash and appends the result to buf.
+    /// - `\<newline>` is line continuation (removed from output)
+    /// - `\n`, `\t` are converted to literal newline/tab
+    /// - `\"`, `\\` are converted to the literal character
+    /// - `\$` is preserved for the expander
+    /// - Other escapes preserve both backslash and character
     fn handleDoubleQuotedEscape(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
         const next = self.peek() orelse {
             try buf.append(self.allocator, '\\');
@@ -169,16 +173,19 @@ pub const Lexer = struct {
         self.advance();
 
         switch (next) {
+            '\n' => self.skipWhitespace(), // Line continuation
             '"', '\\' => try buf.append(self.allocator, next),
             'n' => try buf.append(self.allocator, '\n'),
             't' => try buf.append(self.allocator, '\t'),
-            '$' => try buf.appendSlice(self.allocator, "\\$"), // Preserve for expander
-            else => try buf.appendSlice(self.allocator, &.{ '\\', next }), // Unknown: preserve both
+            '$' => try buf.appendSlice(self.allocator, "\\$"),
+            else => try buf.appendSlice(self.allocator, &.{ '\\', next }),
         }
     }
 
     /// Handles escape sequences in bare words.
-    /// Simpler than double-quoted: only `\$` is special (preserved for expander).
+    /// - `\<newline>` is line continuation (removed, skips following indentation)
+    /// - `\$` is preserved for the expander
+    /// - Other escapes include just the escaped character
     fn handleBareWordEscape(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
         const next = self.peek() orelse {
             try buf.append(self.allocator, '\\');
@@ -186,10 +193,10 @@ pub const Lexer = struct {
         };
         self.advance();
 
-        if (next == '$') {
-            try buf.appendSlice(self.allocator, "\\$"); // Preserve for expander
-        } else {
-            try buf.append(self.allocator, next); // Just the escaped character
+        switch (next) {
+            '\n' => self.skipWhitespace(), // Line continuation
+            '$' => try buf.appendSlice(self.allocator, "\\$"),
+            else => try buf.append(self.allocator, next),
         }
     }
 
@@ -558,6 +565,48 @@ test "Escapes: bare words preserve backslash for expander" {
     const space = try ctx.tokenize("echo hello\\ world");
     try testing.expectEqual(@as(usize, 2), space.len);
     try testing.expectEqualStrings("hello world", space[1].kind.word[0].text);
+}
+
+test "Escapes: line continuation in bare words" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    // Basic line continuation - backslash-newline is removed
+    const basic = try ctx.tokenize("echo hello\\\nworld");
+    try testing.expectEqual(@as(usize, 2), basic.len);
+    try testing.expectEqualStrings("helloworld", basic[1].kind.word[0].text);
+
+    // Line continuation with indentation - leading whitespace on next line is skipped
+    const indented = try ctx.tokenize("cmd \\\n    arg");
+    try testing.expectEqual(@as(usize, 2), indented.len);
+    try testing.expectEqualStrings("arg", indented[1].kind.word[0].text);
+
+    // Line continuation before quoted string
+    const before_quote = try ctx.tokenize("cmd \\\n    \"arg\"");
+    try testing.expectEqual(@as(usize, 2), before_quote.len);
+    try testing.expectEqual(QuoteKind.double, before_quote[1].kind.word[0].quotes);
+    try testing.expectEqualStrings("arg", before_quote[1].kind.word[0].text);
+
+    // Multiple arguments across lines
+    const multi = try ctx.tokenize("cmd \\\n    arg1 \\\n    arg2");
+    try testing.expectEqual(@as(usize, 3), multi.len);
+    try testing.expectEqualStrings("arg1", multi[1].kind.word[0].text);
+    try testing.expectEqualStrings("arg2", multi[2].kind.word[0].text);
+}
+
+test "Escapes: line continuation in double-quoted strings" {
+    var ctx = TestContext.init();
+    defer ctx.deinit();
+
+    // Line continuation inside double quotes
+    const inside = try ctx.tokenize("echo \"hello\\\nworld\"");
+    try testing.expectEqual(@as(usize, 2), inside.len);
+    try testing.expectEqualStrings("helloworld", inside[1].kind.word[0].text);
+
+    // Line continuation with indentation inside double quotes
+    const indented = try ctx.tokenize("echo \"line1\\\n    line2\"");
+    try testing.expectEqual(@as(usize, 2), indented.len);
+    try testing.expectEqualStrings("line1line2", indented[1].kind.word[0].text);
 }
 
 // -----------------------------------------------------------------------------
