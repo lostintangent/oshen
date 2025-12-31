@@ -70,7 +70,7 @@ pub const bracket_builtin = builtins.Builtin{
 // Entry Points
 // =============================================================================
 
-fn runBracket(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
+fn runBracket(_: *builtins.State, cmd: builtins.ExpandedCommand) u8 {
     if (cmd.argv.len < 2) {
         builtins.io.printError("[: missing ']'\n", .{});
         return 2;
@@ -88,7 +88,7 @@ fn runBracket(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     return evaluateExpr(cmd.argv[1 .. cmd.argv.len - 1]);
 }
 
-fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
+fn run(_: *builtins.State, cmd: builtins.ExpandedCommand) u8 {
     if (cmd.argv.len < 2) return 1; // No expression = false
     return evaluateExpr(cmd.argv[1..]);
 }
@@ -327,7 +327,7 @@ fn testExecutable(path: []const u8) u8 {
 
 const testing = std.testing;
 
-fn makeCmd(argv: []const []const u8) builtins.ExpandedCmd {
+fn makeCmd(argv: []const []const u8) builtins.ExpandedCommand {
     return .{ .argv = argv, .env = &.{}, .redirects = &.{} };
 }
 

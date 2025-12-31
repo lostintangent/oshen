@@ -70,7 +70,7 @@ const styles = std.StaticStringMap([]const u8).initComptime(.{
     .{ "--reset", ansi.reset },
 });
 
-fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
+fn run(_: *builtins.State, cmd: builtins.ExpandedCommand) u8 {
     var args = cmd.argv[1..];
     var newline = true;
     var need_space = false;

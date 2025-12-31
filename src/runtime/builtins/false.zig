@@ -7,6 +7,6 @@ pub const builtin = builtins.Builtin{
     .help = "false - Return failure (exit status 1)",
 };
 
-fn run(_: *builtins.State, _: builtins.ExpandedCmd) u8 {
+fn run(_: *builtins.State, _: builtins.ExpandedCommand) u8 {
     return 1;
 }

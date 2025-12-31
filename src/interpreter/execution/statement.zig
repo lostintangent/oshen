@@ -8,7 +8,7 @@
 //! Pipeline execution and job control are delegated to separate modules.
 
 const std = @import("std");
-const expansion_types = @import("../expansion/expanded.zig");
+const expansion_pipeline = @import("../expansion/pipeline.zig");
 const state_mod = @import("../../runtime/state.zig");
 const State = state_mod.State;
 const Scope = @import("../../runtime/scope.zig").Scope;
@@ -17,7 +17,6 @@ const io = @import("../../terminal/io.zig");
 const interpreter_mod = @import("../interpreter.zig");
 const expand = @import("../expansion/word.zig");
 const lexer_mod = @import("../../language/lexer.zig");
-const expansion_statement = @import("../expansion/statement.zig");
 
 // Delegate to specialized modules
 const signals = @import("signals.zig");
@@ -25,7 +24,7 @@ const pipeline = @import("pipeline.zig");
 const capture_mod = @import("capture.zig");
 
 const ast = @import("../../language/ast.zig");
-const ExpandedCmd = expansion_types.ExpandedCmd;
+const ExpandedCommand = expansion_pipeline.ExpandedCommand;
 const posix = signals.posix;
 
 // Recursion limit to prevent stack overflow / OOM
@@ -176,7 +175,7 @@ fn consumeLoopSignal(state: *State) ?LoopSignal {
 /// Execute an if statement by evaluating condition branches and running appropriate branch.
 /// Each branch body gets its own scope - variables created inside are block-local.
 /// Uses scope pooling to avoid allocation overhead in hot loops.
-fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expansion_types.ast.IfStatement) u8 {
+fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: ast.IfStatement) u8 {
     // Try each branch in order (first is "if", rest are "else if")
     for (if_stmt.branches) |branch| {
         // Execute the pre-parsed condition directly
@@ -227,7 +226,7 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
 /// - Loop scope is pushed once, reset each iteration (O(1) variable cleanup)
 /// - Body AST is parsed once and reused for all iterations
 /// - Arena allocations are amortized across iterations
-fn executeEachStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.EachStatement) u8 {
+fn executeEachStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.EachStatement) u8 {
     // Parse arena - lives for entire loop, holds cached body AST and expanded items
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
     defer parse_arena.deinit();
@@ -331,7 +330,7 @@ fn expandItems(arena_alloc: std.mem.Allocator, state: *State, items_source: []co
 /// - Loop scope is pushed once, reset each iteration (O(1) cleanup)
 /// - Body AST is parsed once and reused for all iterations
 /// - Variables created in loop body are scoped to the loop
-fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt: expansion_types.ast.WhileStatement) u8 {
+fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt: ast.WhileStatement) u8 {
     // Parse arena - lives for entire loop duration, holds the cached body AST
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
     defer parse_arena.deinit();
@@ -423,7 +422,7 @@ fn executeSimpleCommand(allocator: std.mem.Allocator, state: *State, stmt: ast.C
     return last_status;
 }
 
-fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.CommandStatement, cmd_str: []const u8) !u8 {
+fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.CommandStatement, cmd_str: []const u8) !u8 {
     // For background jobs, we run the pipeline in a process group
     if (stmt.background) {
         return executeBackgroundJob(allocator, state, stmt, cmd_str);
@@ -439,7 +438,7 @@ fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expans
 }
 
 /// Free memory allocated for expanded commands
-fn freeCommands(allocator: std.mem.Allocator, cmds: []const ExpandedCmd) void {
+fn freeCommands(allocator: std.mem.Allocator, cmds: []const ExpandedCommand) void {
     for (cmds) |cmd| {
         allocator.free(cmd.argv);
         allocator.free(cmd.env);
@@ -449,17 +448,17 @@ fn freeCommands(allocator: std.mem.Allocator, cmds: []const ExpandedCmd) void {
 }
 
 /// Expand a pipeline with current state
-fn expandPipeline(allocator: std.mem.Allocator, state: *State, ast_pipeline: expansion_types.ast.Pipeline) ![]const ExpandedCmd {
+fn expandPipeline(allocator: std.mem.Allocator, state: *State, ast_pipeline: ast.Pipeline) ![]const ExpandedCommand {
     var ctx = expand.ExpandContext.init(allocator, state);
     defer ctx.deinit();
-    return expansion_statement.expandPipeline(allocator, &ctx, ast_pipeline);
+    return expansion_pipeline.expandPipeline(allocator, &ctx, ast_pipeline);
 }
 
 /// Expand a pipeline in a child process context (exits on error instead of returning)
-fn expandPipelineInChild(allocator: std.mem.Allocator, state: *State, ast_pipeline: expansion_types.ast.Pipeline) []const ExpandedCmd {
+fn expandPipelineInChild(allocator: std.mem.Allocator, state: *State, ast_pipeline: ast.Pipeline) []const ExpandedCommand {
     var ctx = expand.ExpandContext.init(allocator, state);
     defer ctx.deinit();
-    return expansion_statement.expandPipeline(allocator, &ctx, ast_pipeline) catch {
+    return expansion_pipeline.expandPipeline(allocator, &ctx, ast_pipeline) catch {
         std.posix.exit(1);
     };
 }
@@ -468,7 +467,7 @@ fn expandPipelineInChild(allocator: std.mem.Allocator, state: *State, ast_pipeli
 ///
 /// For simple builtins, captures output in-process (~100x faster).
 /// For external commands or pipelines, forks a child process.
-fn executeCommandWithCapture(allocator: std.mem.Allocator, state: *State, command: expansion_types.ast.CommandStatement, capture: expansion_types.Capture) !u8 {
+fn executeCommandWithCapture(allocator: std.mem.Allocator, state: *State, command: ast.CommandStatement, capture: ast.Capture) !u8 {
     // Fast path: single builtin without redirects
     if (capture_mod.tryExpandSimpleBuiltin(allocator, state, command)) |expanded| {
         defer expanded.deinit(allocator);
@@ -504,7 +503,7 @@ fn executeCommandWithCapture(allocator: std.mem.Allocator, state: *State, comman
     return result.status;
 }
 
-fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.CommandStatement, cmd_str: []const u8) !u8 {
+fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: ast.CommandStatement, cmd_str: []const u8) !u8 {
     // Fork a child to be the process group leader
     const pid = try std.posix.fork();
 
@@ -561,7 +560,7 @@ fn runDeferredCommandsFromIndex(allocator: std.mem.Allocator, state: *State, fro
     }
 }
 
-fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) ?u8 {
+fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCommand) ?u8 {
     if (cmd.argv.len == 0) return null;
 
     const name = cmd.argv[0];
@@ -625,6 +624,6 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
 ///
 /// Note: This function catches errors internally and returns a status code
 /// to break the error set cycle (exec → pipeline → exec).
-fn tryRunFunction(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) ?u8 {
+fn tryRunFunction(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCommand) ?u8 {
     return runFunctionWithArgs(allocator, state, cmd);
 }

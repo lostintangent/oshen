@@ -108,7 +108,7 @@ const isNumeric = @import("../../terminal/args.zig").isNumeric;
 // Entry Point
 // =============================================================================
 
-fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
+fn run(_: *builtins.State, cmd: builtins.ExpandedCommand) u8 {
     var p = Args("string").init(cmd.argv);
     var cfg = Config{};
 

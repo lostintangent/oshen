@@ -17,6 +17,7 @@
 //!
 //!   3. Fork path - Fork a child process for complex commands
 //!      - External commands, pipelines, redirects, etc.
+//!      - tryExecExternalDirect: Simple external commands exec directly (no double-fork)
 //!
 //! The direct paths achieve ~1000x speedup over forking by avoiding process
 //! creation overhead entirely. Even the full path is ~100x faster than forking
@@ -26,12 +27,13 @@ const std = @import("std");
 const io = @import("../../terminal/io.zig");
 const builtins = @import("../../runtime/builtins.zig");
 const State = @import("../../runtime/state.zig").State;
-const ExpandedCmd = @import("../expansion/expanded.zig").ExpandedCmd;
+const expansion_pipeline = @import("../expansion/pipeline.zig");
+const ExpandedCommand = expansion_pipeline.ExpandedCommand;
 const ast = @import("../../language/ast.zig");
 const expand = @import("../expansion/word.zig");
-const expansion_statement = @import("../expansion/statement.zig");
 const calc = @import("../../runtime/builtins/calc.zig");
 const interpreter = @import("../interpreter.zig");
+const pipeline = @import("pipeline.zig");
 
 // C library functions
 const c = struct {
@@ -79,6 +81,9 @@ pub fn executeAndCapture(allocator: std.mem.Allocator, state: *State, input: []c
     // Fork path: spawn child process for external commands, pipelines, etc.
     switch (try forkWithPipe()) {
         .child => {
+            // Try to exec simple external commands directly (avoids double-fork)
+            tryExecExternalDirect(allocator, state, input);
+            // If tryExecExternalDirect returns, fall back to full interpreter
             const status = interpreter.execute(allocator, state, input) catch 1;
             std.posix.exit(status);
         },
@@ -206,8 +211,8 @@ fn tryCaptureBuiltinDirect(allocator: std.mem.Allocator, state: *State, input: [
     // Check if it's a builtin
     if (!builtins.isBuiltin(argv[0])) return null;
 
-    // Build ExpandedCmd struct for the builtin
-    const cmd = ExpandedCmd{
+    // Build ExpandedCommand struct for the builtin
+    const cmd = ExpandedCommand{
         .argv = argv,
         .env = &.{},
         .redirects = &.{},
@@ -288,7 +293,7 @@ fn isVarChar(char: u8) bool {
 
 /// Result of successfully parsing and expanding a simple builtin command.
 const CapturedBuiltin = struct {
-    expanded: ExpandedBuiltin,
+    expanded: ExpandedSimple,
     arena: std.heap.ArenaAllocator,
 };
 
@@ -343,22 +348,40 @@ fn getSimpleCommandStatement(parsed: interpreter.ParsedInput) ?ast.CommandStatem
     return cmd;
 }
 
-/// A simple builtin command that can be captured in-process.
-/// Contains both the expanded command and the slice it came from (for cleanup).
-pub const ExpandedBuiltin = struct {
-    cmd: ExpandedCmd,
-    slice: []const ExpandedCmd,
+/// A simple expanded command (single command, no pipes, no redirects).
+/// Contains both the command and the backing slice (for cleanup).
+pub const ExpandedSimple = struct {
+    cmd: ExpandedCommand,
+    slice: []const ExpandedCommand,
 
-    /// Free all memory allocated for the expanded commands.
-    pub fn deinit(self: ExpandedBuiltin, allocator: std.mem.Allocator) void {
-        for (self.slice) |cmd| {
-            allocator.free(cmd.argv);
-            allocator.free(cmd.env);
-            allocator.free(cmd.redirects);
-        }
-        allocator.free(self.slice);
+    pub fn deinit(self: ExpandedSimple, allocator: std.mem.Allocator) void {
+        freeExpandedSlice(allocator, self.slice);
     }
 };
+
+/// Try to expand a CommandStatement as a simple command (single, no pipes, no redirects).
+/// Returns null if the statement is too complex. Caller must check if the result
+/// is a builtin, function, or external command as needed.
+fn tryExpandSimpleCommand(allocator: std.mem.Allocator, state: *State, stmt: ast.CommandStatement) ?ExpandedSimple {
+    // Must be: single chain, single command, no redirects
+    if (stmt.chains.len != 1) return null;
+    const chain = stmt.chains[0];
+    if (chain.pipeline.commands.len != 1) return null;
+    if (chain.pipeline.commands[0].redirects.len != 0) return null;
+
+    // Expand the command
+    var ctx = expand.ExpandContext.init(allocator, state);
+    defer ctx.deinit();
+    const expanded = expansion_pipeline.expandPipeline(allocator, &ctx, chain.pipeline) catch return null;
+
+    // Verify: single command, has argv, no redirects after expansion
+    if (expanded.len != 1 or expanded[0].argv.len == 0 or expanded[0].redirects.len != 0) {
+        freeExpandedSlice(allocator, expanded);
+        return null;
+    }
+
+    return .{ .cmd = expanded[0], .slice = expanded };
+}
 
 /// Try to expand a CommandStatement as a simple builtin (single command, no redirects).
 ///
@@ -368,47 +391,71 @@ pub const ExpandedBuiltin = struct {
 /// - Redirects (>, <, etc.)
 /// - External commands (not a builtin)
 ///
-/// On success, caller owns the returned ExpandedBuiltin and must call deinit().
-pub fn tryExpandSimpleBuiltin(allocator: std.mem.Allocator, state: *State, stmt: ast.CommandStatement) ?ExpandedBuiltin {
-    // Must be: single chain, single command, no redirects in AST
-    if (stmt.chains.len != 1) return null;
-    const chain = stmt.chains[0];
-    if (chain.pipeline.commands.len != 1) return null;
-    if (chain.pipeline.commands[0].redirects.len != 0) return null;
+/// On success, caller owns the returned ExpandedSimple and must call deinit().
+pub fn tryExpandSimpleBuiltin(allocator: std.mem.Allocator, state: *State, stmt: ast.CommandStatement) ?ExpandedSimple {
+    const result = tryExpandSimpleCommand(allocator, state, stmt) orelse return null;
+    const name = result.cmd.argv[0];
 
-    // Expand and verify it's a builtin
-    var ctx = expand.ExpandContext.init(allocator, state);
-    defer ctx.deinit();
-
-    const expanded = expansion_statement.expandPipeline(allocator, &ctx, chain.pipeline) catch return null;
-
-    // Verify: single command, has argv, no redirects after expansion, is a builtin
-    if (expanded.len != 1 or expanded[0].argv.len == 0 or expanded[0].redirects.len != 0) {
-        freeExpandedSlice(allocator, expanded);
-        return null;
-    }
-    const name = expanded[0].argv[0];
+    // Must be a builtin (not external command or function)
     if (!builtins.isBuiltin(name)) {
-        freeExpandedSlice(allocator, expanded);
-        return null;
-    }
-    // eval and source execute arbitrary code that may have redirects/pipes
-    // They must use fork-based capture to honor those correctly
-    if (std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "source")) {
-        freeExpandedSlice(allocator, expanded);
+        result.deinit(allocator);
         return null;
     }
 
-    return .{ .cmd = expanded[0], .slice = expanded };
+    // eval and source execute arbitrary code - must use fork-based capture
+    if (std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "source")) {
+        result.deinit(allocator);
+        return null;
+    }
+
+    return result;
 }
 
-fn freeExpandedSlice(allocator: std.mem.Allocator, cmds: []const ExpandedCmd) void {
+fn freeExpandedSlice(allocator: std.mem.Allocator, cmds: []const ExpandedCommand) void {
     for (cmds) |cmd| {
         allocator.free(cmd.argv);
         allocator.free(cmd.env);
         allocator.free(cmd.redirects);
     }
     allocator.free(cmds);
+}
+
+// =============================================================================
+// Direct External Exec (avoids double-fork)
+// =============================================================================
+
+/// Try to exec a simple external command directly from the capture child.
+///
+/// Called inside the forked capture child. If the input is a simple external
+/// command (single command, no pipes, no redirects), we exec it directly
+/// instead of going through the full interpreter (which would fork again).
+///
+/// This eliminates the "double-fork" overhead for simple external command
+/// substitutions like `$(date +%s)` or `$(uname)`.
+///
+/// If the command is complex (pipeline, redirects, builtin, function) or
+/// parsing fails, this function returns and the caller falls back to the
+/// full interpreter.
+fn tryExecExternalDirect(allocator: std.mem.Allocator, state: *State, input: []const u8) void {
+    // Parse and validate it's a simple command statement
+    const parsed = interpreter.parseInput(allocator, input) catch return;
+    const cmd_stmt = getSimpleCommandStatement(parsed) orelse return;
+
+    // Nested capture not supported in direct path
+    if (cmd_stmt.capture != null) return;
+
+    // Expand to a simple command
+    const result = tryExpandSimpleCommand(allocator, state, cmd_stmt) orelse return;
+    const name = result.cmd.argv[0];
+
+    // Only exec external commands - builtins/functions handled by interpreter
+    if (builtins.isBuiltin(name) or state.getFunction(name) != null) {
+        result.deinit(allocator);
+        return;
+    }
+
+    // It's a simple external command - exec directly (does not return)
+    pipeline.execCommand(allocator, result.cmd);
 }
 
 // =============================================================================
@@ -421,7 +468,7 @@ fn freeExpandedSlice(allocator: std.mem.Allocator, cmds: []const ExpandedCmd) vo
 /// and zero heap allocations. Reuses Writer for buffering (no separate impl).
 ///
 /// Only works for builtins (not external commands or pipelines).
-pub fn captureBuiltin(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) !CaptureResult {
+pub fn captureBuiltin(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCommand) !CaptureResult {
     // Use a Writer as the capture buffer - same type builtins use internally
     var w = io.Writer{};
 

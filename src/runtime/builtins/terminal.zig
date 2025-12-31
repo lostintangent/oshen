@@ -73,7 +73,7 @@ const commands = std.StaticStringMap(Command).initComptime(.{
     .{ "title", cmdTitle },
 });
 
-fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
+fn run(_: *builtins.State, cmd: builtins.ExpandedCommand) u8 {
     const args = cmd.argv[1..];
 
     // Validate arguments first (even when not a TTY)

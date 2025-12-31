@@ -7,10 +7,10 @@
 //! the file descriptor table for the command being executed.
 
 const std = @import("std");
-const expansion_types = @import("../expansion/expanded.zig");
+const expansion_pipeline = @import("../expansion/pipeline.zig");
 const io = @import("../../terminal/io.zig");
 
-const ExpandedRedirect = expansion_types.ExpandedRedirect;
+const ExpandedRedirect = expansion_pipeline.ExpandedRedirect;
 
 // =============================================================================
 // Public API

@@ -19,7 +19,7 @@ pub const builtin = builtins.Builtin{
     .help = "jobs - List background and stopped jobs",
 };
 
-fn run(state: *builtins.State, _: builtins.ExpandedCmd) u8 {
+fn run(state: *builtins.State, _: builtins.ExpandedCommand) u8 {
     // Interactive mode requires TTY on both stdin and stdout
     const stdin_tty = std.posix.isatty(std.posix.STDIN_FILENO);
     const stdout_tty = std.posix.isatty(std.posix.STDOUT_FILENO);

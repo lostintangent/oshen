@@ -7,7 +7,7 @@
 //! - Waiting for child processes
 
 const std = @import("std");
-const expansion_types = @import("../expansion/expanded.zig");
+const expansion_pipeline = @import("../expansion/pipeline.zig");
 const state_mod = @import("../../runtime/state.zig");
 const State = state_mod.State;
 const builtins = @import("../../runtime/builtins.zig");
@@ -15,7 +15,7 @@ const io = @import("../../terminal/io.zig");
 const redirect = @import("redirect.zig");
 const signals = @import("signals.zig");
 
-const ExpandedCmd = expansion_types.ExpandedCmd;
+const ExpandedCommand = expansion_pipeline.ExpandedCommand;
 const posix = signals.posix;
 
 // =============================================================================
@@ -24,14 +24,14 @@ const posix = signals.posix;
 
 /// Function pointer type for trying to run commands as user-defined functions.
 /// Returns exit status if command was a function, null if not a function.
-pub const FunctionExecutor = *const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8;
+pub const FunctionExecutor = *const fn (std.mem.Allocator, *State, ExpandedCommand) ?u8;
 
 // =============================================================================
 // Public API
 // =============================================================================
 
 /// Build null-terminated argv array for execvpe
-pub fn buildArgv(allocator: std.mem.Allocator, cmd: ExpandedCmd) !std.ArrayListUnmanaged(?[*:0]const u8) {
+pub fn buildArgv(allocator: std.mem.Allocator, cmd: ExpandedCommand) !std.ArrayListUnmanaged(?[*:0]const u8) {
     var argv: std.ArrayListUnmanaged(?[*:0]const u8) = .empty;
     errdefer argv.deinit(allocator);
 
@@ -45,7 +45,7 @@ pub fn buildArgv(allocator: std.mem.Allocator, cmd: ExpandedCmd) !std.ArrayListU
 }
 
 /// Execute a pipeline in foreground, checking for aliases, builtins, and functions first
-pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, commands: []const ExpandedCmd, tryRunFunction: FunctionExecutor) !u8 {
+pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, commands: []const ExpandedCommand, tryRunFunction: FunctionExecutor) !u8 {
     if (commands.len == 0) return 0;
 
     // Single command - check for builtin first, then functions
@@ -54,7 +54,7 @@ pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, co
         if (cmd.argv.len > 0) {
             // Check if it's a builtin
             if (builtins.isBuiltin(cmd.argv[0])) {
-                // If builtin has redirections, fork to apply them properly
+                // Builtin with redirections - handle specially (in-process when possible)
                 if (cmd.redirects.len > 0) {
                     return try executeBuiltinWithRedirects(allocator, state, cmd);
                 }
@@ -79,73 +79,88 @@ pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, co
 }
 
 /// Execute a builtin command with file redirections.
-/// Uses in-process redirect for simple stdout redirects (avoids fork overhead).
-/// Falls back to fork for complex cases (stdin redirects, stderr, fd duplication).
-fn executeBuiltinWithRedirects(_: std.mem.Allocator, state: *State, cmd: ExpandedCmd) !u8 {
-    // Fast path: single stdout redirect (>, >>) - handle in-process
-    if (cmd.redirects.len == 1) {
-        const redir = cmd.redirects[0];
-        if (redir.from_fd == std.posix.STDOUT_FILENO) {
-            switch (redir.kind) {
-                .write_truncate, .write_append => |path| {
-                    return executeBuiltinWithStdoutRedirect(state, cmd, path, redir.kind == .write_append);
-                },
-                else => {},
-            }
+/// Uses in-process redirect for output-only redirects (avoids fork overhead).
+/// Falls back to fork for stdin redirects which are more complex.
+fn executeBuiltinWithRedirects(_: std.mem.Allocator, state: *State, cmd: ExpandedCommand) !u8 {
+    // Input redirects require fork because builtins may read from stdin
+    for (cmd.redirects) |redir| {
+        if (redir.kind == .read) return forkBuiltinWithRedirects(state, cmd);
+    }
+
+    // Fast path: output-only redirects can be handled in-process (~30x faster)
+    return executeBuiltinInProcess(state, cmd);
+}
+
+/// Execute a builtin with output redirects in-process (no fork).
+/// Handles `> file`, `2> file`, `> file 2>&1`, `>> file`, etc.
+fn executeBuiltinInProcess(state: *State, cmd: ExpandedCommand) !u8 {
+    // Save stdout/stderr for restoration after builtin completes
+    const saved = SavedFds.init() catch return forkBuiltinWithRedirects(state, cmd);
+    defer saved.restore();
+
+    // Apply redirects in order (order matters for `>out 2>&1` vs `2>&1 >out`)
+    for (cmd.redirects) |redir| {
+        switch (redir.kind) {
+            .write_truncate, .write_append => |path| {
+                const fd = openForWrite(path, redir.kind == .write_append) orelse return 1;
+                defer std.posix.close(fd); // Close source fd after dup2; target fd keeps file open
+                std.posix.dup2(fd, redir.from_fd) catch return 1;
+            },
+            .dup => |to_fd| std.posix.dup2(to_fd, redir.from_fd) catch return 1,
+            .read => unreachable, // Filtered out in caller
         }
     }
 
-    // Slow path: complex redirects - fork to handle safely
+    return builtins.tryRun(state, cmd) orelse 127;
+}
+
+/// Saved stdout/stderr file descriptors for restoration after in-process redirects.
+const SavedFds = struct {
+    stdout: std.posix.fd_t,
+    stderr: std.posix.fd_t,
+
+    fn init() !SavedFds {
+        const stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
+        errdefer std.posix.close(stdout);
+        const stderr = try std.posix.dup(std.posix.STDERR_FILENO);
+        return .{ .stdout = stdout, .stderr = stderr };
+    }
+
+    fn restore(self: SavedFds) void {
+        std.posix.dup2(self.stdout, std.posix.STDOUT_FILENO) catch {};
+        std.posix.dup2(self.stderr, std.posix.STDERR_FILENO) catch {};
+        std.posix.close(self.stdout);
+        std.posix.close(self.stderr);
+    }
+};
+
+/// Open a file for write redirect (truncate or append mode).
+fn openForWrite(path: []const u8, append: bool) ?std.posix.fd_t {
+    return std.posix.open(path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = !append,
+        .APPEND = append,
+    }, 0o644) catch |err| {
+        io.printError("oshen: {s}: {}\n", .{ path, err });
+        return null;
+    };
+}
+
+/// Fork and execute a builtin with redirects (fallback for stdin redirects).
+fn forkBuiltinWithRedirects(state: *State, cmd: ExpandedCommand) !u8 {
     const pid = try std.posix.fork();
 
     if (pid == 0) {
-        // Child: apply redirections, then run builtin
-        redirect.apply(cmd.redirects) catch {
-            std.posix.exit(1);
-        };
-
-        const status = builtins.tryRun(state, cmd) orelse 127;
-        std.posix.exit(status);
+        redirect.apply(cmd.redirects) catch std.posix.exit(1);
+        std.posix.exit(builtins.tryRun(state, cmd) orelse 127);
     }
 
-    // Parent: wait for child
     return waitForChild(pid);
 }
 
-/// Execute a builtin with stdout redirected to a file, in-process (no fork).
-/// This is ~10-50x faster than forking for simple cases like `echo foo > file`.
-fn executeBuiltinWithStdoutRedirect(state: *State, cmd: ExpandedCmd, path: []const u8, append: bool) !u8 {
-    // Open the output file
-    const flags: std.posix.O = .{
-        .ACCMODE = .WRONLY,
-        .CREAT = true,
-        .TRUNC = if (append) false else true,
-        .APPEND = append,
-    };
-    const fd = std.posix.open(path, flags, 0o644) catch |err| {
-        io.printError("oshen: {s}: {}\n", .{ path, err });
-        return 1;
-    };
-    defer std.posix.close(fd);
-
-    // Save original stdout
-    const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
-    defer std.posix.close(saved_stdout);
-
-    // Redirect stdout to file
-    try std.posix.dup2(fd, std.posix.STDOUT_FILENO);
-
-    // Run the builtin
-    const status = builtins.tryRun(state, cmd) orelse 127;
-
-    // Restore stdout (use catch to ensure we always attempt restoration)
-    std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO) catch {};
-
-    return status;
-}
-
 /// Execute a user-defined function with redirects in a forked child
-fn executeFunctionWithRedirects(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd, tryRunFunction: FunctionExecutor) !u8 {
+fn executeFunctionWithRedirects(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCommand, tryRunFunction: FunctionExecutor) !u8 {
     const pid = try std.posix.fork();
 
     if (pid == 0) {
@@ -165,7 +180,7 @@ fn executeFunctionWithRedirects(allocator: std.mem.Allocator, state: *State, cmd
 // =============================================================================
 
 /// Execute a pipeline in a child process (no job control needed)
-pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, commands: []const ExpandedCmd, tryRunFunction: ?FunctionExecutor) !u8 {
+pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, commands: []const ExpandedCommand, tryRunFunction: ?FunctionExecutor) !u8 {
     if (commands.len == 0) return 0;
 
     // In child, we don't need job control - just execute
@@ -227,7 +242,7 @@ pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, comm
     return last_status;
 }
 
-fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd, tryRunFunction: ?FunctionExecutor) !u8 {
+fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCommand, tryRunFunction: ?FunctionExecutor) !u8 {
     if (cmd.argv.len == 0) return 0;
 
     // Builtin fast paths
@@ -269,7 +284,7 @@ fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: Expand
 /// 4. Waits for all children to complete
 ///
 /// Used for external commands and pipelines that can't run in-process.
-pub fn forkPipeline(allocator: std.mem.Allocator, state: *State, commands: []const ExpandedCmd, tryRunFunction: FunctionExecutor) !u8 {
+pub fn forkPipeline(allocator: std.mem.Allocator, state: *State, commands: []const ExpandedCommand, tryRunFunction: FunctionExecutor) !u8 {
     const n = commands.len;
 
     // Create pipes for multi-command pipeline
@@ -397,7 +412,7 @@ pub fn forkPipeline(allocator: std.mem.Allocator, state: *State, commands: []con
 // =============================================================================
 
 /// Execute a single command (fork + exec + wait)
-pub fn executeCommandSimple(allocator: std.mem.Allocator, cmd: ExpandedCmd) !u8 {
+pub fn executeCommandSimple(allocator: std.mem.Allocator, cmd: ExpandedCommand) !u8 {
     if (cmd.argv.len == 0) return 0;
 
     const pid = try std.posix.fork();
@@ -428,12 +443,12 @@ pub fn setupPipeRedirects(stdin_fd: ?std.posix.fd_t, stdout_fd: ?std.posix.fd_t)
 // =============================================================================
 
 /// Execute command in child process (does not return)
-pub fn execCommand(allocator: std.mem.Allocator, cmd: ExpandedCmd) noreturn {
+pub fn execCommand(allocator: std.mem.Allocator, cmd: ExpandedCommand) noreturn {
     execCommandWithState(allocator, null, null, cmd);
 }
 
 /// Execute command in child process with optional state for builtins (does not return)
-pub fn execCommandWithState(allocator: std.mem.Allocator, state: ?*State, tryRunFunction: ?FunctionExecutor, cmd: ExpandedCmd) noreturn {
+pub fn execCommandWithState(allocator: std.mem.Allocator, state: ?*State, tryRunFunction: ?FunctionExecutor, cmd: ExpandedCommand) noreturn {
     // Apply file redirections
     redirect.apply(cmd.redirects) catch {
         std.posix.exit(1);

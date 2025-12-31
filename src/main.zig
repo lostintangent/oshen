@@ -1,30 +1,12 @@
-//! Oshen Shell - A modern, Zig-powered shell.
-//!
-//! # Architecture
-//!
-//! Oshen follows a classic 4-stage pipeline architecture:
-//!
-//! 1. **Lexer** (`src/language/lexer.zig`): Converts raw source text into a stream of tokens.
-//! 2. **Parser** (`src/language/parser.zig`): Consumes tokens and produces an Abstract Syntax Tree (AST).
-//!    - Supports "Parse Once, Execute Many" for loops by storing bodies as raw source.
-//! 3. **Expansion** (`src/interpreter/expansion/`): Processes the AST before execution.
-//!    - Variable expansion (`$var`), Command substitution (`$(cmd)`), Globs (`*.zig`).
-//! 4. **Execution** (`src/interpreter/execution/`): Traverses the AST and runs commands.
-//!    - Manages job control, signals, and process groups.
-//!    - Implements builtins and external command execution.
-//!
-//! # Entry Points
-//!
-//! - `main.zig`: CLI entry point, handles argument parsing and initialization.
-//! - `repl/`: Interactive Read-Eval-Print Loop with syntax highlighting and history.
-//! - `interpreter/`: Core execution engine.
+//! Oshen shell - A modern, Zig-powered shell.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const cli = @import("cli.zig");
+const build_options = @import("build_options");
 const State = @import("runtime/state.zig").State;
 const repl = @import("repl/repl.zig");
 const io = @import("terminal/io.zig");
+const args = @import("terminal/args.zig");
 const interpreter = @import("interpreter/interpreter.zig");
 const signals = @import("interpreter/execution/signals.zig");
 
@@ -34,26 +16,88 @@ const CONFIG_FILE = ".oshen_floor";
 /// C library setenv (not exposed in Zig std for macOS)
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
+// =============================================================================
+// CLI Argument Parsing
+// =============================================================================
+
+const RunMode = union(enum) {
+    interactive,
+    command: []const u8,
+    script: []const u8,
+};
+
+const Options = struct {
+    mode: RunMode = .interactive,
+    is_login: bool = false,
+};
+
+/// CLI argument spec - single source of truth for parsing and help
+const cli_spec = args.Spec("oshen", .{
+    .usage = "oshen [OPTIONS] [SCRIPT]",
+    .desc = "Oshen Shell (v" ++ build_options.version ++ ")",
+    .args = .{
+        .help = args.Flag(.{ .short = "h", .long = "help", .desc = "Show this help" }),
+        .version = args.Flag(.{ .short = "v", .long = "version", .desc = "Show version" }),
+        .login = args.Flag(.{ .short = "l", .long = "login", .desc = "Run as login shell" }),
+        .interactive = args.Flag(.{ .short = "i", .long = "interactive", .desc = "Force interactive mode" }),
+        .command = args.StringOption(.{ .short = "c", .long = "command", .desc = "Execute command and exit" }),
+        .script = args.StringPositional(.{ .desc = "Script file to execute", .default = "" }),
+    },
+    .examples = &.{
+        "oshen                   Start interactive REPL",
+        "oshen -c 'echo hello'   Run a single command",
+        "oshen script.osh        Execute a script file",
+    },
+});
+
+fn parseArgs(argv: []const []const u8) args.ParseError!?Options {
+    const r = try cli_spec.parse(argv);
+
+    if (r.help) {
+        io.writeStdout(cli_spec.help);
+        return null;
+    }
+
+    if (r.version) {
+        io.writeStdout(build_options.version ++ "\n");
+        return null;
+    }
+
+    // Check if invoked as login shell (argv[0] starts with '-')
+    const is_login_invocation = argv.len > 0 and argv[0].len > 0 and argv[0][0] == '-';
+    return .{
+        .is_login = r.login or is_login_invocation,
+        .mode = if (r.command) |cmd|
+            .{ .command = cmd }
+        else if (r.script.len > 0)
+            .{ .script = r.script }
+        else
+            .interactive,
+    };
+}
+
+// =============================================================================
+// Main Entry Point
+// =============================================================================
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Parse command line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
 
-    const opts = cli.parseArgs(args) catch {
-        // Error already printed by args parser
+    const opts = parseArgs(argv) catch {
         std.process.exit(1);
     } orelse {
-        // Help or version was printed, exit successfully
-        return;
+        return; // Help or version was printed
     };
 
     // Initialize shell state
     var state = State.init(allocator);
-    state.initCurrentScope(); // Fix up self-referential pointer after struct is in final location
+    state.initCurrentScope();
     defer state.deinit();
 
     // On macOS, run path_helper to get the full system PATH for login/interactive shells
@@ -63,13 +107,10 @@ pub fn main() !void {
 
     switch (opts.mode) {
         .interactive => {
-            // Set up signal handling for interactive mode
             state.interactive = true;
             signals.initInteractive(&state);
-
-            // Load config file
+            
             loadConfig(allocator, &state);
-
             try repl.run(allocator, &state, interpreter.execute);
         },
         .command => |cmd| {
@@ -90,10 +131,7 @@ fn loadConfig(allocator: std.mem.Allocator, state: *State) void {
     const config_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, CONFIG_FILE }) catch return;
     defer allocator.free(config_path);
 
-    // Silently ignore if config doesn't exist
-    _ = interpreter.executeFile(allocator, state, config_path) catch {
-        // Config file doesn't exist or can't be read - that's fine
-    };
+    _ = interpreter.executeFile(allocator, state, config_path) catch {};
 }
 
 /// Run macOS path_helper to get the full system PATH from /etc/paths and /etc/paths.d
@@ -106,14 +144,12 @@ fn runPathHelper(allocator: std.mem.Allocator) void {
     defer allocator.free(result.stderr);
 
     // Output format: PATH="..."; export PATH;
-    // Extract the PATH value between quotes
     const prefix = "PATH=\"";
     const start = std.mem.indexOf(u8, result.stdout, prefix) orelse return;
     const path_start = start + prefix.len;
     const path_end = std.mem.indexOfPos(u8, result.stdout, path_start, "\"") orelse return;
     const path_value = result.stdout[path_start..path_end];
 
-    // Set the PATH environment variable using POSIX setenv
     const path_z = allocator.dupeZ(u8, path_value) catch return;
     defer allocator.free(path_z);
     _ = setenv("PATH", path_z, 1);
@@ -124,17 +160,11 @@ fn runPathHelper(allocator: std.mem.Allocator) void {
 // =============================================================================
 
 test {
-    // Include modules with tests that aren't in the main import graph
-    // Language
     _ = @import("language/lexer.zig");
     _ = @import("language/parser.zig");
-
-    // Interpreter
     _ = @import("interpreter/expansion/glob.zig");
     _ = @import("interpreter/expansion/word.zig");
-    _ = @import("interpreter/expansion/statement.zig");
-
-    // Runtime
+    _ = @import("interpreter/expansion/pipeline.zig");
     _ = @import("runtime/state.zig");
     _ = @import("runtime/scope.zig");
     _ = @import("runtime/jobs.zig");
@@ -144,12 +174,8 @@ test {
     _ = @import("runtime/builtins/string.zig");
     _ = @import("runtime/builtins/terminal.zig");
     _ = @import("runtime/builtins/test.zig");
-
-    // Terminal
     _ = @import("terminal/args.zig");
     _ = @import("terminal/io/writer.zig");
-
-    // REPL
     _ = @import("repl/editor/editor.zig");
     _ = @import("repl/editor/history.zig");
     _ = @import("repl/editor/ui/complete.zig");

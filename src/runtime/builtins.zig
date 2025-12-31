@@ -7,7 +7,7 @@ const std = @import("std");
 
 // Re-export types commonly needed by builtin implementations
 pub const State = @import("state.zig").State;
-pub const ExpandedCmd = @import("../interpreter/expansion/expanded.zig").ExpandedCmd;
+pub const ExpandedCommand = @import("../interpreter/expansion/pipeline.zig").ExpandedCommand;
 pub const io = @import("../terminal/io.zig");
 pub const env = @import("env.zig");
 
@@ -20,7 +20,7 @@ pub const env = @import("env.zig");
 pub const isNumeric = @import("../terminal/args.zig").isNumeric;
 
 /// Standard signature for all builtin commands
-pub const BuiltinFn = *const fn (*State, ExpandedCmd) u8;
+pub const BuiltinFn = *const fn (*State, ExpandedCommand) u8;
 
 /// Builtin command definition
 pub const Builtin = struct {
@@ -30,10 +30,10 @@ pub const Builtin = struct {
 };
 
 /// Create a Builtin from a Spec type - handles parsing automatically.
-/// The run function receives parsed args instead of raw ExpandedCmd.
+/// The run function receives parsed args instead of raw ExpandedCommand.
 pub fn fromSpec(comptime S: type, comptime run_fn: *const fn (*State, S.Result) u8) Builtin {
     const wrapper = struct {
-        fn run(st: *State, cmd: ExpandedCmd) u8 {
+        fn run(st: *State, cmd: ExpandedCommand) u8 {
             const parsed = S.parse(cmd.argv) catch return 1;
             return run_fn(st, parsed);
         }
@@ -127,7 +127,7 @@ pub fn getNames() []const []const u8 {
 }
 
 /// Try to run a builtin command. Returns null if not a builtin.
-pub fn tryRun(st: *State, cmd: ExpandedCmd) ?u8 {
+pub fn tryRun(st: *State, cmd: ExpandedCommand) ?u8 {
     if (cmd.argv.len == 0) return null;
 
     const name = cmd.argv[0];

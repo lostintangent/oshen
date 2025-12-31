@@ -48,7 +48,7 @@ pub const equals_builtin = builtins.Builtin{
     .help = "= EXPR - Evaluate arithmetic expression (alias for calc)",
 };
 
-fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
+fn run(_: *builtins.State, cmd: builtins.ExpandedCommand) u8 {
     const args = cmd.argv[1..];
     if (args.len == 0) {
         builtins.io.printError("{s}: missing expression\n", .{cmd.argv[0]});

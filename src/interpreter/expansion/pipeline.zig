@@ -1,36 +1,66 @@
-//! AST expansion: transforms parsed statements into expanded form ready for execution.
+//! Pipeline expansion: transforms parsed pipelines into expanded form ready for execution.
 //!
-//! This module bridges the parser and executor by expanding AST nodes:
+//! This module bridges the parser and executor by expanding pipeline commands:
 //! - Command arguments are expanded (variables, globs, command substitution)
 //! - Aliases are resolved
 //! - Redirections are evaluated
-//! - Control flow statements pass through unchanged (expanded at execution time)
+//!
+//! Types defined here:
+//! - ExpandedCommand - fully expanded command with argv, env, and redirects
+//! - ExpandedRedirect - expanded I/O redirection
 
 const std = @import("std");
 const ast = @import("../../language/ast.zig");
-const expansion_types = @import("expanded.zig");
 const token_types = @import("../../language/tokens.zig");
 const expand = @import("word.zig");
 const lexer_mod = @import("../../language/lexer.zig");
 const State = @import("../../runtime/state.zig").State;
 
 // =============================================================================
-// Type Aliases
+// Expanded Types
 // =============================================================================
 
-const Program = ast.Program;
-const Stmt = ast.Statement;
-const ChainItem = ast.ChainItem;
+/// The type of I/O redirection after expansion (paths are strings).
+pub const ExpandedRedirectKind = union(enum) {
+    /// Redirect input from a file to fd (defaults to stdin)
+    read: []const u8,
+    /// Redirect output to a file (truncate) from fd (defaults to stdout)
+    write_truncate: []const u8,
+    /// Redirect output to a file (append) from fd (defaults to stdout)
+    write_append: []const u8,
+    /// Duplicate one fd to another (e.g., 2>&1)
+    dup: u8,
+};
+
+/// A single I/O redirection after expansion (paths are resolved strings).
+pub const ExpandedRedirect = struct {
+    /// File descriptor being redirected (0=stdin, 1=stdout, 2=stderr)
+    from_fd: u8,
+    /// The type and target of the redirection
+    kind: ExpandedRedirectKind,
+};
+
+/// A fully expanded command ready for execution.
+/// AST Command has words with $vars, globs, quotes.
+/// ExpandedCommand has flat argv strings ready for exec.
+pub const ExpandedCommand = struct {
+    argv: []const []const u8,
+    env: []const ast.Assignment,
+    redirects: []const ExpandedRedirect,
+};
+
+// Re-export AST types needed by other modules
+pub const CaptureMode = ast.CaptureMode;
+pub const Capture = ast.Capture;
+
+// =============================================================================
+// Type Aliases (internal)
+// =============================================================================
+
 const Pipeline = ast.Pipeline;
 const Command = ast.Command;
 const Redirect = ast.Redirect;
 const WordPart = token_types.WordPart;
-const CaptureMode = ast.CaptureMode;
-
-const ExpandedCmd = expansion_types.ExpandedCmd;
-const ExpandedRedirect = expansion_types.ExpandedRedirect;
-const ExpandedRedirectKind = expansion_types.ExpandedRedirectKind;
-const Capture = expansion_types.Capture;
 
 pub const ExpandError = error{
     EmptyCommand,
@@ -41,9 +71,9 @@ pub const ExpandError = error{
 // Public API
 // =============================================================================
 
-/// Expand all commands in a pipeline, returning owned slice of ExpandedCmd
-pub fn expandPipeline(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, pipeline: Pipeline) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)![]const ExpandedCmd {
-    var cmd_expanded: std.ArrayListUnmanaged(ExpandedCmd) = .empty;
+/// Expand all commands in a pipeline, returning owned slice of ExpandedCommand.
+pub fn expandPipeline(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, pipeline: Pipeline) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)![]const ExpandedCommand {
+    var cmd_expanded: std.ArrayListUnmanaged(ExpandedCommand) = .empty;
 
     for (pipeline.commands) |cmd| {
         const expanded_result = try expandCommand(allocator, ctx, cmd);
@@ -57,7 +87,7 @@ pub fn expandPipeline(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, 
 // Internal Expansion Functions
 // =============================================================================
 
-fn expandCommand(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, cmd: Command) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedCmd {
+fn expandCommand(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, cmd: Command) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedCommand {
     var env_list: std.ArrayListUnmanaged(ast.Assignment) = .empty;
 
     const words_with_alias = try applyAliasExpansion(allocator, ctx, cmd.words);
@@ -75,7 +105,7 @@ fn expandCommand(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, cmd: 
         try redir_expanded.append(allocator, redir_result);
     }
 
-    return ExpandedCmd{
+    return ExpandedCommand{
         .argv = expanded_argv,
         .env = try env_list.toOwnedSlice(allocator),
         .redirects = try redir_expanded.toOwnedSlice(allocator),
@@ -194,12 +224,32 @@ fn joinValues(allocator: std.mem.Allocator, values: []const []const u8) std.mem.
 const testing = std.testing;
 const parser = @import("../../language/parser.zig");
 
-fn expandInput(allocator: std.mem.Allocator, input: []const u8) !Program {
-    var lex = lexer_mod.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-    var p = parser.Parser.init(allocator, tokens);
-    return try p.parse();
-}
+/// Test helpers for pipeline expansion tests.
+const TestHelper = struct {
+    /// Parse input and expand the first command in the pipeline.
+    fn expandFirst(arena: *std.heap.ArenaAllocator, state: *State, input: []const u8) !ExpandedCommand {
+        const cmds = try expandAll(arena, state, input);
+        return cmds[0];
+    }
+
+    /// Parse input and expand all commands in the first pipeline.
+    fn expandAll(arena: *std.heap.ArenaAllocator, state: *State, input: []const u8) ![]const ExpandedCommand {
+        const alloc = arena.allocator();
+        const prog = try parse(alloc, input);
+        const pl = prog.statements[0].command.chains[0].pipeline;
+        var ctx = expand.ExpandContext.init(alloc, state);
+        defer ctx.deinit();
+        return try expandPipeline(alloc, &ctx, pl);
+    }
+
+    /// Parse input without expansion.
+    fn parse(alloc: std.mem.Allocator, input: []const u8) !ast.Program {
+        var lex = lexer_mod.Lexer.init(alloc, input);
+        const tokens = try lex.tokenize();
+        var p = parser.Parser.init(alloc, tokens);
+        return try p.parse();
+    }
+};
 
 test "simple command" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -207,80 +257,63 @@ test "simple command" {
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const prog = try expandInput(arena.allocator(), "echo hello world");
+    const cmd = try TestHelper.expandFirst(&arena, &state, "echo hello world");
 
-    try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    // Expand the pipeline at execution time
-    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
-    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd_expanded = expanded_cmds[0];
-    try testing.expectEqual(@as(usize, 3), cmd_expanded.argv.len);
-    try testing.expectEqualStrings("echo", cmd_expanded.argv[0]);
-    try testing.expectEqualStrings("hello", cmd_expanded.argv[1]);
-    try testing.expectEqualStrings("world", cmd_expanded.argv[2]);
+    try testing.expectEqual(@as(usize, 3), cmd.argv.len);
+    try testing.expectEqualStrings("echo", cmd.argv[0]);
+    try testing.expectEqualStrings("hello", cmd.argv[1]);
+    try testing.expectEqualStrings("world", cmd.argv[2]);
 }
 
-test "pipeline normalizes |> to |" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const prog = try expandInput(arena.allocator(), "cat file |> grep foo");
-
-    const pipeline = prog.statements[0].command.chains[0].pipeline;
-    try testing.expectEqual(@as(usize, 2), pipeline.commands.len);
-}
-
-test "with variable expansion" {
+test "pipeline: multiple commands" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const name_values = [_][]const u8{"world"};
-    try ctx.setVar("name", &name_values);
+    const cmds = try TestHelper.expandAll(&arena, &state, "cat file | grep foo");
 
-    const prog = try expandInput(arena.allocator(), "echo $name");
-
-    // Expand the pipeline at execution time
-    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
-    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd_expanded = expanded_cmds[0];
-    try testing.expectEqual(@as(usize, 2), cmd_expanded.argv.len);
-    try testing.expectEqualStrings("echo", cmd_expanded.argv[0]);
-    try testing.expectEqualStrings("world", cmd_expanded.argv[1]);
+    try testing.expectEqual(@as(usize, 2), cmds.len);
+    try testing.expectEqualStrings("cat", cmds[0].argv[0]);
+    try testing.expectEqualStrings("grep", cmds[1].argv[0]);
 }
 
-test "with env prefix" {
+test "variable expansion" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const prog = try expandInput(arena.allocator(), "FOO=bar env");
+    try state.setVar("name", "world");
+    const cmd = try TestHelper.expandFirst(&arena, &state, "echo $name");
 
-    // Expand the pipeline at execution time
-    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
-    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd_expanded = expanded_cmds[0];
-    try testing.expectEqual(@as(usize, 1), cmd_expanded.env.len);
-    try testing.expectEqualStrings("FOO", cmd_expanded.env[0].key);
-    try testing.expectEqualStrings("bar", cmd_expanded.env[0].value);
+    try testing.expectEqual(@as(usize, 2), cmd.argv.len);
+    try testing.expectEqualStrings("echo", cmd.argv[0]);
+    try testing.expectEqualStrings("world", cmd.argv[1]);
+}
+
+test "env prefix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    state.initCurrentScope();
+    defer state.deinit();
+
+    const cmd = try TestHelper.expandFirst(&arena, &state, "FOO=bar env");
+
+    try testing.expectEqual(@as(usize, 1), cmd.env.len);
+    try testing.expectEqualStrings("FOO", cmd.env[0].key);
+    try testing.expectEqualStrings("bar", cmd.env[0].value);
 }
 
 test "capture preserved" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const prog = try expandInput(arena.allocator(), "whoami => user");
+    const prog = try TestHelper.parse(arena.allocator(), "whoami => user");
 
     try testing.expectEqualStrings("user", prog.statements[0].command.capture.?.variable);
     try testing.expectEqual(ast.CaptureMode.string, prog.statements[0].command.capture.?.mode);
@@ -290,7 +323,7 @@ test "background preserved" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const prog = try expandInput(arena.allocator(), "sleep 10 &");
+    const prog = try TestHelper.parse(arena.allocator(), "sleep 10 &");
 
     try testing.expectEqual(true, prog.statements[0].command.background);
 }
@@ -301,103 +334,51 @@ test "redirect: variable expansion in path" {
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const outfile_values = [_][]const u8{"output.txt"};
-    try ctx.setVar("outfile", &outfile_values);
-
-    const prog = try expandInput(arena.allocator(), "echo test > $outfile");
-
-    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
-    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd = expanded_cmds[0];
+    try state.setVar("outfile", "output.txt");
+    const cmd = try TestHelper.expandFirst(&arena, &state, "echo test > $outfile");
 
     try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
-    switch (cmd.redirects[0].kind) {
-        .write_truncate => |path| {
-            try testing.expectEqualStrings("output.txt", path);
-        },
-        else => return error.TestExpectedEqual,
-    }
+    try testing.expectEqualStrings("output.txt", cmd.redirects[0].kind.write_truncate);
 }
 
-test "redirect: double-quoted path with spaces" {
+test "redirect: quoted path with spaces" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const prog = try expandInput(arena.allocator(), "echo test > \"foo bar.txt\"");
-
-    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
-    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd = expanded_cmds[0];
+    const cmd = try TestHelper.expandFirst(&arena, &state, "echo test > \"foo bar.txt\"");
 
     try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
-    switch (cmd.redirects[0].kind) {
-        .write_truncate => |path| {
-            try testing.expectEqualStrings("foo bar.txt", path);
-        },
-        else => return error.TestExpectedEqual,
-    }
+    try testing.expectEqualStrings("foo bar.txt", cmd.redirects[0].kind.write_truncate);
 }
 
-test "redirect: single-quoted path prevents expansion" {
+test "redirect: single quotes prevent expansion" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    // Set a variable that should NOT be expanded due to single quotes
-    const var_values = [_][]const u8{"should_not_appear"};
-    try ctx.setVar("var", &var_values);
-
-    const prog = try expandInput(arena.allocator(), "echo test > '$var.txt'");
-
-    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
-    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd = expanded_cmds[0];
+    try state.setVar("var", "should_not_appear");
+    const cmd = try TestHelper.expandFirst(&arena, &state, "echo test > '$var.txt'");
 
     try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
-    switch (cmd.redirects[0].kind) {
-        .write_truncate => |path| {
-            // Single quotes should preserve the literal $var.txt
-            try testing.expectEqualStrings("$var.txt", path);
-        },
-        else => return error.TestExpectedEqual,
-    }
+    try testing.expectEqualStrings("$var.txt", cmd.redirects[0].kind.write_truncate);
 }
 
-test "redirect: double-quoted path expands variables" {
+test "redirect: double quotes expand variables" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
     state.initCurrentScope();
     defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const name_values = [_][]const u8{"myfile"};
-    try ctx.setVar("name", &name_values);
-
-    const prog = try expandInput(arena.allocator(), "echo test > \"$name.txt\"");
-
-    const ast_pipeline = prog.statements[0].command.chains[0].pipeline;
-    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd = expanded_cmds[0];
+    try state.setVar("name", "myfile");
+    const cmd = try TestHelper.expandFirst(&arena, &state, "echo test > \"$name.txt\"");
 
     try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
-    switch (cmd.redirects[0].kind) {
-        .write_truncate => |path| {
-            try testing.expectEqualStrings("myfile.txt", path);
-        },
-        else => return error.TestExpectedEqual,
-    }
+    try testing.expectEqualStrings("myfile.txt", cmd.redirects[0].kind.write_truncate);
 }
