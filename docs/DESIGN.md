@@ -51,9 +51,26 @@ Control flow bodies are stored as source strings, not sub-ASTs. Parsed on first 
 
 ### Lexer (`language/lexer.zig`)
 
-Raw text to tokens. Recognizes operators (`>`, `|`, etc.), quoted strings, command substition, separators (`;`, `\n`), and comments.
+Raw text to tokens. Recognizes operators (`>`, `|`, etc.), quoted strings, command substitution (`(...)`), brace expansion (`{...}`), separators (`;`, `\n`), and comments. Nested delimiters are tracked so `file_(echo {a,b}).zig` correctly identifies boundaries.
 
-**What it doesn't do:** Expand variables, evaluate globs, interpret tildes. These pass through as literal text. This keeps the lexer simple and enables quote-aware expansion later.
+**Multipart words:** A single word can contain multiple parts with different quoting contexts. This enables prefix/suffix wrapping around constructs that expand to multiple values—command substitution, brace expansion, and globs.
+
+Parts always combine via Cartesian product. This is what makes multipart words more powerful than string interpolation: instead of producing one string, they can produce N strings without a loop.
+
+- **Command substitution** — each output line becomes a separate value (`file_(echo a b c).zig` → `file_a.zig file_b.zig file_c.zig`)
+- **Brace expansion** — comma lists and ranges produce multiple values (`src/{lib,bin,test}/main.zig` → three paths)
+- **Globs** — pattern matches produce multiple values (`backup_*.tar.gz` → matching files)
+
+When multiple parts each produce multiple values, results multiply:
+
+```
+{debug,release}_$(uname -m)  →  debug_arm64 release_arm64
+```
+
+**What it doesn't do:**
+
+- Expand variables, globs, or tildes (expander)
+- Distinguish keywords from bare words (parser)
 
 ### Parser (`language/parser.zig`)
 

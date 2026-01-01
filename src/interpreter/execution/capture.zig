@@ -208,7 +208,8 @@ fn tryCaptureBuiltinDirect(allocator: std.mem.Allocator, state: *State, input: [
 
     const argv = argv_buf[0..argc];
 
-    // Check if it's a builtin
+    // Check if it's a builtin (and not shadowed by a function)
+    if (state.getFunction(argv[0]) != null) return null;
     if (!builtins.isBuiltin(argv[0])) return null;
 
     // Build ExpandedCommand struct for the builtin
@@ -396,8 +397,8 @@ pub fn tryExpandSimpleBuiltin(allocator: std.mem.Allocator, state: *State, stmt:
     const result = tryExpandSimpleCommand(allocator, state, stmt) orelse return null;
     const name = result.cmd.argv[0];
 
-    // Must be a builtin (not external command or function)
-    if (!builtins.isBuiltin(name)) {
+    // Must be a builtin, not shadowed by a function
+    if (state.getFunction(name) != null or !builtins.isBuiltin(name)) {
         result.deinit(allocator);
         return null;
     }

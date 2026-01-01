@@ -4,7 +4,7 @@
 //! - `Token`: A lexical unit produced by the lexer, containing:
 //!   - `TokenKind`: A union of either a word, operator, or separator
 //!   - `TokenSpan`: The source position of the token (byte indices) in the script/command
-//! - `WordPart`: A segment of a word token with its quoting context
+//! - `WordPart`: A part of a word token with its quoting context
 //!       (e.g., `hello"world"` produces two WordParts: one unquoted, one double-quoted)
 //! - `Operator`: Enum of all shell operators (pipes, redirects, logical, capture, background)
 //! - `Separator`: Enum of command separators (newline, semicolon)
@@ -20,20 +20,22 @@
 
 const std = @import("std");
 
-/// Indicates how a word segment was quoted in the source.
+/// Indicates how a word part was quoted in the source.
 /// Used by the expander to determine which expansions apply:
 /// - `none`: bare word, all expansions apply (variables, globs, escapes)
 /// - `double`: double-quoted, variable expansion only (no globs)
 /// - `single`: single-quoted, no expansion (literal)
 /// - `command`: command substitution $(...) or (...), executed and result expanded
+/// - `brace`: brace expansion {...}, expands to multiple values
 pub const QuoteKind = enum {
     none,
     double,
     single,
     command,
+    brace,
 };
 
-/// A segment of a word with its quoting context.
+/// A part of a word with its quoting context.
 ///
 /// Words are composed of one or more parts when quote boundaries are present.
 /// This enables Cartesian product expansion where each part can have different
@@ -60,6 +62,15 @@ pub const WordPart = struct {
         return self.quotes == other.quotes and std.mem.eql(u8, self.text, other.text);
     }
 };
+
+/// Returns the text if parts is a single bare (unquoted) word, null otherwise.
+/// This is a common pattern for keyword detection and simple word extraction.
+pub fn getBareText(parts: []const WordPart) ?[]const u8 {
+    if (parts.len == 1 and parts[0].quotes == .none) {
+        return parts[0].text;
+    }
+    return null;
+}
 
 /// Source location for a token as byte indices for O(1) source slicing.
 /// Line/column positions can be computed on-demand from byte indices when needed

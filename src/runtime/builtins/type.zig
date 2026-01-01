@@ -23,7 +23,7 @@ fn run(state: *builtins.State, r: spec.Result) u8 {
 }
 
 fn showType(state: *builtins.State, name: []const u8) bool {
-    switch (resolve.resolve(state, name)) {
+    switch (resolve.resolveCommand(state, name, true)) {
         .alias => |expansion| {
             builtins.io.printStdout("{s} is aliased to '{s}'\n", .{ name, expansion });
             return true;

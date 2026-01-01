@@ -1,12 +1,12 @@
 # 🌊 Oshen
 
-A modern shell with a great developer experience out-of-the-box:
+A modern shell that's powerful out of the box:
 
-- **Zero-setup REPL** — Syntax highlighting, ghost text, tab completions, and a git-aware default prompt.
-- **Clean syntax** — Familiar control flow with [block-scoped variables](#variable-scoping), plus [`defer`](#defer) for automatic cleanup.
-- **Lists by default** — Variables, [globs](#glob-patterns), and [brace expansion](#brace-expansion) all produce lists, which can be enumerated, indexed, or sliced.
-- **Modern builtins** — [Colored output](#colored-output-with-print), [output capture](#output-capture), [arithmetic (`calc`/`=`)](#calc-expressions), [`increment`](#increment), [`range`](#generating-sequences-with-range), [`string`](#string-manipulation-with-string), [`path_prepend`](#path_prepend), and more!
-- **Fast** — Carefully optimized to make real-world scripts and interactive use snappy.
+- **Zero config** — Syntax highlighting, autosuggestions, tab completion, and a git-aware prompt. Just works.
+- **Sane defaults** — Variables are lists. Block scoping. No quoting nightmares with `$@` vs `$*`.
+- **Expressive syntax** — Bare parens `(cmd)` for substitution, `each` with automatic `$item`, globs and braces that multiply: `{a,b}_{x,y}` → 4 values.
+- **Modern builtins** — `print --green`, `=>` for output capture, `defer` for cleanup, `string` for text processing.
+- **Fast and efficient** — Written in Zig. Starts instantly (~3ms), runs scripts quickly, and uses minimal memory (~2MB).
 
 ---
 
@@ -47,17 +47,50 @@ chsh -s $(which oshen)
 ## Quick Start
 
 ```sh
-# Run interactive shell
-oshen
+# Run commands
+ls -la | grep .txt
+cat file.txt > output.txt
 
-# Run a command
-oshen -c "print --magenta hello world"
+# Variables and substitution
+var name "world"
+print "Hello, $name!"
+var files (ls *.txt)              # capture command output
 
-# Run a script
-oshen script.wave
+# Loops
+each file in *.txt
+    print "Processing $file"
+end
+
+# Globs and brace expansion
+rm *.log                          # delete all .log files
+mkdir -p src/{lib,bin,test}       # create multiple directories
+
+# Pipelines with output capture
+git status --short =>@ changes
+for c in $changes
+    print "Changed: $c"
+end
 ```
 
 ---
+
+### Commands & I/O
+
+- [Pipelines](#pipelines)
+- [Redirections](#redirections)
+- [Globs](#globs)
+- [Command Substitution](#command-substitution)
+- [Output Capture](#output-capture)
+- [Job Control](#job-control)
+
+### Core Language
+
+- [Variables](#variables)
+- [Lists](#lists)
+- [Conditionals](#conditionals)
+- [Loops](#loops)
+- [Functions](#functions)
+- [Comments](#comments)
 
 ### Interactive Shell
 
@@ -68,32 +101,6 @@ oshen script.wave
 - [History](#history)
 - [Configuration](#configuration)
 
-### Core Language
-
-- [Variables](#variables)
-- [Environment Variables](#environment-variables)
-- [Quoting & Escaping](#quoting--escaping)
-- [Comments](#comments)
-
-### Control Flow
-
-- [If Statements](#if-statements)
-- [Each Loops](#each-loops)
-- [While Loops](#while-loops)
-- [Conditional Chaining](#conditional-chaining)
-- [Functions](#functions)
-- [Defer](#defer)
-
-### Commands & I/O
-
-- [Pipelines](#pipelines)
-- [Redirections](#redirections)
-- [Output Capture](#output-capture)
-- [Command Substitution](#command-substitution)
-- [Job Control](#job-control)
-- [Glob Patterns](#glob-patterns)
-- [Brace Expansion](#brace-expansion)
-
 ### Reference
 
 - [Builtins](#builtins)
@@ -101,230 +108,152 @@ oshen script.wave
 
 ---
 
-# Interactive Shell
+# Commands & I/O
 
-Oshen's interactive mode provides a modern editing experience out of the box—no plugins or configuration required.
-
-## Syntax Highlighting
-
-Commands, strings, operators, and variables are color-coded as you type:
-
-- **Commands** — Valid commands (builtins, functions, aliases, executables) in green
-- **Invalid commands** — Unknown commands in red
-- **Keywords** — Control flow (`if`, `for`, `while`, etc.) in blue
-- **Strings** — Quoted strings in yellow
-- **Numbers** — Numeric literals in yellow
-- **Variables** — `$var` expansions in magenta
-- **Globs** — Patterns like `*.txt` in magenta
-- **Tilde** — Home directory (`~`, `~/path`) in magenta
-- **Operators** — Pipes, redirects, logical, background in cyan
-- **Separators** — `;` and newlines dimmed
-
-Highlighting updates in real-time as you edit, giving instant feedback on syntax errors.
-
-## Autosuggestions
-
-As you type, Oshen shows suggestions from your command history in dimmed text:
-
-```shell
-$ git com                           # You type this
-$ git commit -m "Update docs"       # Suggestion appears dimmed
-```
-
-- Press **→** or **End** to accept the full suggestion
-- Press **Alt+→** to accept word-by-word
-- Continue typing to refine or ignore
-
-Suggestions are **context-aware**, scored by:
-- **Directory** — Commands from your current directory rank highest
-- **Recency** — Recent commands rank higher (exponential decay)
-- **Frequency** — Frequently-used commands rank higher
-- **Success** — Successful commands get a small bonus over failures
-
-This means `cd src` in project A suggests differently than in project B.
-
-## Tab Completion
-
-Press **Tab** to complete commands and paths:
-
-### Command Completion
-
-At the start of a line, Tab completes from:
-- All builtin commands (`cd`, `set`, `export`, etc.)
-- Executables found in your `$PATH`
-
-```shell
-$ ec<Tab>        →  $ echo
-$ gi<Tab>        →  $ git
-```
-
-### Path Completion
-
-In argument positions (or when the word contains `/`, `.`, or `~`), Tab completes file and directory paths:
-
-```shell
-$ cat ~/Doc<Tab>      →  $ cat ~/Documents/
-$ ls src/*.z<Tab>     →  $ ls src/main.zig
-```
-
-- Directories get a trailing `/` automatically
-- Hidden files (starting with `.`) are shown only when the prefix starts with `.`
-
-### Multiple Matches
-
-When multiple completions exist, Tab inserts the common prefix. Press Tab again to see all options.
-
-## Line Editing
-
-Oshen provides Emacs-style line editing keybindings:
-
-| Key | Action |
-|-----|--------|
-| **←** / **→** | Move cursor left/right |
-| **Ctrl+A** / **Home** | Move to beginning of line |
-| **Ctrl+E** / **End** | Move to end of line |
-| **Ctrl+W** | Delete word before cursor |
-| **Ctrl+U** | Delete from cursor to beginning |
-| **Ctrl+K** | Delete from cursor to end |
-| **Backspace** | Delete character before cursor |
-| **Delete** | Delete character at cursor |
-| **Ctrl+L** | Clear screen |
-| **Ctrl+C** | Cancel current line |
-| **Ctrl+D** | Exit shell (on empty line) |
-
-## History
-
-Command history is automatically saved to `~/.oshen_history` and persists across sessions.
-
-| Key | Action |
-|-----|--------|
-| **↑** / **Ctrl+P** | Previous command in history |
-| **↓** / **Ctrl+N** | Next command in history |
-
-History features:
-- **10,000 entries** — Retains months of usage
-- **Context-aware** — Each command records the working directory, timestamp, and exit status
-- **Frequency tracking** — Same command in the same directory increments frequency (no duplicates)
-- **Binary format** — Fast load/save with `~/.oshen_history`
-
-## Configuration
-
-Oshen loads `~/.oshen_floor` for every interactive shell. Like fish, there's no separate "profile" vs "rc" file—just one config that runs each time.
-
-### Example Configuration
+## Pipelines
 
 ```sh
-# ~/.oshen_floor
+cat file.txt | grep error | wc -l
 
-# Homebrew (macOS)
-export HOMEBREW_PREFIX "/opt/homebrew"
-export HOMEBREW_CELLAR "/opt/homebrew/Cellar"
-export HOMEBREW_REPOSITORY "/opt/homebrew"
-path_prepend PATH /opt/homebrew/bin /opt/homebrew/sbin
-
-# Node.js (nvm)
-export NVM_DIR "$HOME/.nvm"
-path_prepend PATH $NVM_DIR/versions/node/v22.17.1/bin
-
-# Other tools
-path_prepend PATH $HOME/.local/bin $HOME/bin
-
-# Aliases
-alias ll 'ls -la'
-alias gs 'git status'
-alias gp 'git push'
-
-# Shell variables
-var EDITOR vim
-var PAGER less
-
-# Custom functions
-fun mkcd
-    mkdir -p $1 && cd $1
-end
-```
-
-### path_prepend
-
-The `path_prepend` builtin adds paths to a variable while **deduplicating**—safe to run on every shell without duplicating entries:
-
-```sh
-path_prepend PATH /opt/homebrew/bin /opt/homebrew/sbin
-path_prepend MANPATH /opt/homebrew/share/man
-```
-
-### Custom Prompt
-
-The default prompt shows your current directory in green, and if you're in a git repository, the current branch in magenta:
-
-```sh
-~/projects/oshen (main) #
-```
-
-To customize this, define a function named `prompt`. The function's stdout becomes the prompt string:
-
-```sh
-# Simple custom prompt
-fun prompt
-    print "oshen > "
-end
-
-# Show git branch
-fun prompt
-    var branch (git branch --show-current 2>/dev/null)
-    if test -n "$branch"
-        print "[$branch] $ "
-    else
-        print "$ "
-    end
-end
-
-# Colorful prompt with path
-fun prompt
-    print -n --green (pwd -t) --reset " # "
-end
+# Alternative syntax (reads like data flow)
+cat file.txt |> grep error |> wc -l
 ```
 
 ---
 
-## Colored Output with `print`
+## Redirections
 
-The `print` builtin works like `echo` but supports inline color flags for expressive terminal output:
+### Output Redirection
+
+| Operator | Description |
+|----------|-------------|
+| `>`      | Write stdout (truncate) |
+| `>>`     | Write stdout (append) |
+| `2>`     | Write stderr (truncate) |
+| `2>>`    | Write stderr (append) |
+| `&>`     | Write both stdout and stderr |
+| `2>&1`   | Redirect stderr to stdout |
+
+### Input Redirection
 
 ```sh
-# Simple text
-print "Hello, world!"
+sort < unsorted.txt
+wc -l < data.txt
+```
 
-# Colored output
-print --green "✓ Build succeeded"
-print --red "✗ Build failed"
-print --yellow "⚠ Warning: disk space low"
+### Examples
 
-# Interleaved colors in one line
-print --green "PASS" --reset "tests/unit.zig"
-print --blue "info:" --reset "Server started on port" --cyan "8080"
+```sh
+# Save output to file
+ls -la > listing.txt
 
-# Styled text
-print --bold "Important:" --reset "Read carefully"
-print --dim "Last updated: "(date)
+# Append to log
+echo "Done" >> log.txt
 
-# Combining styles
-print --bold --red "ERROR" --reset "Connection refused"
+# Redirect errors
+./script.sh 2> errors.log
 
-# In scripts
-if zig build
-    print --green "✓" --reset "Build completed"
-else
-    print --red "✗" --reset "Build failed"
+# Combine stderr with stdout in pipeline
+./script.sh 2>&1 | grep ERROR
+```
+
+---
+
+## Globs
+
+Glob patterns expand against the filesystem. Each match becomes a separate value:
+
+```sh
+*.txt                        # All .txt files
+src/*.zig                    # .zig files in src/
+test?.txt                    # test1.txt, testA.txt, etc.
+**/*.zig                     # All .zig files anywhere (recursive)
+```
+
+| Pattern | Matches |
+|---------|----------|
+| `*` | Any sequence of characters |
+| `**` | Any directory depth (recursive) |
+| `?` | Any single character |
+| `[abc]` | Any character in the set |
+| `[a-z]` | Any character in the range |
+| `[!abc]` or `[^abc]` | Any character NOT in the set |
+
+Globs are suppressed in quotes: `echo "*.txt"` prints a literal asterisk.
+
+---
+
+## Command Substitution
+
+Capture command output inline using `(...)` or `$(...)`:
+
+```sh
+print "Today is "(date +%A)
+var files (ls *.txt)
+
+# Multi-line output becomes a list
+for f in (ls)
+    print "- $f"
 end
 ```
 
-**Supported flags:**
-- Colors: `--red`, `--green`, `--yellow`, `--blue`, `--magenta`, `--purple`, `--cyan`, `--gray`
-- Styles: `--bold`, `--dim`, `--reset`
-- Options: `-n` (no newline)
+Use bare `(...)` for cleaner code. Use `$(...)` when you need interpolation inside double quotes: `"user: $(whoami)"`.
 
-Colors auto-reset at the end of each `print`—no need to add `--reset` at the end.
+---
+
+## Output Capture
+
+Capture command output directly into variables:
+
+### String Capture (`=>`)
+
+```sh
+git rev-parse --short HEAD => sha
+print "Current commit: $sha"
+
+whoami => user
+print "Logged in as $user"
+```
+
+### Lines Capture (`=>@`)
+
+Split output into a list (one item per line):
+
+```sh
+ls *.txt =>@ files
+for f in $files
+    print "File: $f"
+end
+```
+
+> **Tip:** Output capture (`=>`) is great for simple assignments. For inline use, prefer bare parens: `var files (ls *.txt)`
+
+---
+
+## Job Control
+
+Run and manage background processes:
+
+### Background Execution
+
+```sh
+sleep 30 &                   # Run in background
+[1] 12345                    # Job ID and PID
+```
+
+### Managing Jobs
+
+```sh
+jobs                         # List all jobs
+fg 1                         # Bring job 1 to foreground
+bg 1                         # Resume stopped job in background
+fg                           # Foreground most recent job
+```
+
+### Signals
+
+- **Ctrl+C** — Send SIGINT to foreground job
+- **Ctrl+Z** — Stop foreground job, return to prompt
 
 ---
 
@@ -351,69 +280,6 @@ echo ${greeting}             # Braced: hello
 echo "$greeting world"       # In double quotes: hello world
 echo '$greeting'             # Single quotes: literal $greeting
 ```
-
-### List Variables
-
-Variables in Oshen are **lists by default**:
-
-```sh
-var files a.txt b.txt c.txt
-
-# Each item becomes a separate argument
-echo $files                  # Equivalent to: echo a.txt b.txt c.txt
-
-# Prefix/suffix applies to each item (cartesian product)
-echo test_$files             # test_a.txt test_b.txt test_c.txt
-```
-
-### Array Indexing
-
-Access individual elements or slices of a list using bracket notation. Indices are **1-based**, and negative indices count from the end:
-
-```sh
-var colors red green blue yellow
-
-echo $colors[1]              # red (first element)
-echo $colors[2]              # green
-echo $colors[-1]             # yellow (last element)
-echo $colors[-2]             # blue (second-to-last)
-```
-
-#### Slicing
-
-Use `..` to extract a range of elements (both bounds inclusive):
-
-```sh
-var nums a b c d e
-
-echo $nums[2..4]             # b c d
-echo $nums[3..]              # c d e (from index 3 to end)
-echo $nums[..2]              # a b (from start to index 2)
-echo $nums[-2..-1]           # d e (last two elements)
-```
-
-#### With argv
-
-Commonly used to access function arguments:
-
-```sh
-fun greet
-    print "Hello, $argv[1]!"
-    print "Remaining args: $argv[2..]"
-end
-
-greet Alice Bob Carol
-# Hello, Alice!
-# Remaining args: Bob Carol
-```
-
-| Syntax | Description |
-|--------|-------------|
-| `$var[n]` | Element at index n (1-based) |
-| `$var[-n]` | Element n from the end |
-| `$var[a..b]` | Elements from a to b (inclusive) |
-| `$var[n..]` | Elements from n to end |
-| `$var[..n]` | Elements from start to n |
 
 ### Variable Scoping
 
@@ -486,9 +352,7 @@ greet Alice "good morning"
 | `$*` | All arguments (as separate words) |
 | `$argv` | All arguments (as a list) |
 
----
-
-## Environment Variables
+### Environment Variables
 
 Use `export` to make variables available to child processes:
 
@@ -496,203 +360,147 @@ Use `export` to make variables available to child processes:
 export PATH "$HOME/bin:$PATH"
 export EDITOR vim
 
-# Or use = syntax
-export EDITOR=vim
-
 # Export an existing shell variable
 var MY_VAR value
 export MY_VAR
 ```
 
----
-
-## Quoting & Escaping
-
-### Single Quotes — Literal
+### Quoting & Escaping
 
 ```sh
-echo 'No $expansion here'    # No $expansion here
-echo 'Preserves "quotes"'    # Preserves "quotes"
+echo 'No $expansion here'    # Single quotes: literal, no expansion
+echo "Hello, $name"          # Double quotes: variables expand, globs don't
+echo \$literal               # Backslash: escape single characters
 ```
 
-### Double Quotes — Interpolated
-
-```sh
-set name Alice
-echo "Hello, $name"          # Hello, Alice
-echo "Tab:\there"            # Tab:    here
-```
-
-Supported escapes: `\n`, `\t`, `\\`, `\"`, `\$`
-
-### Backslash Escaping
-
-```sh
-echo \$literal               # $literal
-echo hello\ world            # hello world (single argument)
-```
+Supported escapes in double quotes: `\n`, `\t`, `\\`, `\"`, `\$`
 
 ---
 
-## Comments
+## Lists
+
+Variables in Oshen are **lists by default**. The language provides concise syntax for creating, accessing, and transforming lists.
+
+### Creating Lists
 
 ```sh
-# This is a comment
-echo hello  # inline comment
+var colors red green blue        # Literal values
+var nums {1..5}                  # Brace expansion: 1 2 3 4 5
+var chars {a,b,c}                # Comma list: a b c
+var files (ls *.txt)             # Command output
+```
+
+Brace expansion supports variables in ranges:
+
+```sh
+var n 10
+echo {1..$n}                     # 1 2 3 4 5 6 7 8 9 10
+echo file{1..$n}.txt             # file1.txt file2.txt ... file10.txt
+```
+
+Cartesian products combine multiple expansions:
+
+```sh
+mkdir -p {src,test}/{lib,bin}    # Creates 4 directories
+echo {a,b}_{1,2}                 # a_1 a_2 b_1 b_2
+```
+
+### Accessing Elements
+
+Indices are **1-based**. Negative indices count from the end:
+
+```sh
+var colors red green blue yellow
+
+echo $colors[1]                  # red (first)
+echo $colors[-1]                 # yellow (last)
+echo $colors[2..3]               # green blue (slice)
+echo $colors[2..]                # green blue yellow (to end)
+```
+
+| Syntax | Description |
+|--------|-------------|
+| `$var[n]` | Element at index n |
+| `$var[-n]` | Element n from end |
+| `$var[a..b]` | Slice from a to b (inclusive) |
+| `$var[n..]` | From index n to end |
+| `$var[..n]` | From start to index n |
+
+### Iterating
+
+Use `each` or `for` to loop over list elements:
+
+```sh
+var files (ls *.txt)
+for f in $files
+    print "Processing $f"
+end
+
+# Or use the implicit $item variable
+each $files
+    print "File: $item"
+end
+```
+
+### The `list` Builtin
+
+The `list` command creates and transforms lists:
+
+```sh
+# Create ranges
+list 1..10                       # 1 through 10
+list 1..10 -s 2                  # 1 3 5 7 9 (step by 2)
+list a..z                        # a through z
+
+# Transform lists
+list @items --sort               # Sort alphabetically
+list @items --sort -n            # Sort numerically
+list @items --reverse            # Reverse order
+list @items --unique             # Remove duplicates
+
+# Mutate in place
+list @items --sort --inplace     # Sort and update variable
+
+# Store result
+list @items --sort --into sorted # Sort into new variable
+```
+
+Use `@varname` to pass a variable by reference (efficient for large lists).
+
+### Testing Lists
+
+```sh
+# Check membership
+if list @items --contains "foo"
+    print "Found foo"
+end
+
+# Check if empty
+if list @items --empty
+    print "No items"
+end
+
+# Get length
+list @items --length             # Prints count
 ```
 
 ---
 
-# Control Flow
-
-## If Statements
+## Conditionals
 
 ```sh
 if test -f config.txt
     print "Config found"
+else if test -f config.json
+    print "JSON config found"
 else
     print "No config"
 end
-
-# Inline form
-if test $x -eq 0; print "zero"; end
 ```
 
-The condition is any command — exit status 0 means true.
+The condition is any command—exit status 0 means true.
 
-### Else If Chains
-
-Use `else if` to chain multiple conditions:
-
-```sh
-var x 15
-
-if test $x -lt 10
-    print "small"
-else if test $x -lt 20
-    print "medium"
-else if test $x -lt 100
-    print "large"
-else
-    print "huge"
-end
-```
-
-Only the first matching branch executes. The final `else` is optional.
-
----
-
-## Each Loops
-
-The `each` statement iterates over items, providing automatic `$item` and `$index` variables:
-
-```sh
-# Simple form - items available as $item, index as $index
-each *.txt
-    print "[$index] Processing $item"
-end
-
-# Named form - custom variable name
-each file in *.txt
-    print "Processing $file (index: $index)"
-end
-
-# Loop over a variable list
-var names Alice Bob Carol
-each name in $names
-    print "Hello, $name"
-end
-
-# Inline form
-each a b c; print $item; end
-```
-
-### The `for` Keyword
-
-The `for` keyword is an alias for `each` with identical behavior:
-
-```sh
-# These are equivalent:
-each x in a b c
-    print $x
-end
-
-for x in a b c
-    print $x
-end
-
-# for also supports implicit $item and $index:
-for *.txt
-    print "[$index] $item"
-end
-```
-
-Use `each` as the primary syntax—`for` is provided for familiarity with other shells.
-
----
-
-## While Loops
-
-Repeat while a condition is true:
-
-```sh
-var count 5
-while test $count -gt 0
-    print "Countdown: $count"
-    var count (= $count - 1)
-end
-
-# Wait for a file to appear
-while test ! -f ready.txt
-    print "Waiting..."
-    sleep 1
-end
-
-# Inline form
-while true; print "loop"; end
-```
-
-The condition is any command — exit status 0 means continue.
-
----
-
-## Break and Continue
-
-Control loop execution with `break` and `continue`:
-
-### Break
-
-Exit the loop immediately:
-
-```sh
-for i in 1 2 3 4 5
-    print $i
-    if test $i -eq 3
-        break
-    end
-end
-# Output: 1 2 3
-```
-
-### Continue
-
-Skip the rest of the current iteration and continue with the next:
-
-```sh
-for i in 1 2 3 4 5
-    if test $i -eq 3
-        continue
-    end
-    print $i
-end
-# Output: 1 2 4 5
-```
-
-Both `break` and `continue` work in `each` and `while` loops.
-
----
-
-## Conditional Chaining
+### Chaining
 
 ```sh
 test -f file.txt && print "exists"
@@ -705,9 +513,52 @@ test -f file.txt or  print "missing"
 
 ---
 
-## Functions
+## Loops
 
-Define reusable commands:
+### Each / For
+
+Iterate over items with automatic `$item` and `$index` variables:
+
+```sh
+each *.txt
+    print "[$index] $item"
+end
+
+# Named variable
+each file in *.txt
+    print "Processing $file"
+end
+
+# Inline form
+each a b c; print $item; end
+```
+
+`for` is an alias for `each`.
+
+### While
+
+```sh
+var count 5
+while test $count -gt 0
+    print "Countdown: $count"
+    var count (= $count - 1)
+end
+```
+
+### Break and Continue
+
+```sh
+for i in 1 2 3 4 5
+    if test $i -eq 2; continue; end    # skip 2
+    if test $i -eq 4; break; end       # stop at 4
+    print $i
+end
+# Output: 1 3
+```
+
+---
+
+## Functions
 
 ```sh
 fun greet
@@ -715,324 +566,117 @@ fun greet
 end
 
 greet Alice                  # Hello, Alice!
-
-# Inline definition (single statement)
-fun hi; print "Hi there"; end
 ```
 
-Functions receive arguments in `$argv`. Use `return` to exit early with a specific exit code:
+Functions receive arguments in `$argv`. Use `return` to exit early:
 
 ```sh
 fun check_file
     if test ! -f $1
-        return 1        # Exit with status 1 (failure)
+        return 1
     end
     cat $1
-    return 0            # Exit with status 0 (success)
 end
-
-# Check the exit status
-check_file config.txt
-echo $?                 # Prints the return code
 ```
 
----
+### Defer
 
-## Defer
-
-Schedule cleanup commands that run automatically when a function exits. Inspired by Go and Zig, `defer` ensures resources are released regardless of how the function exits—normal completion, early return, or error.
+Schedule cleanup that runs when a function exits—regardless of how it exits:
 
 ```sh
 fun with_tempdir
     var tmpdir (mktemp -d)
     defer rm -rf $tmpdir           # Runs when function exits
 
-    print "Working in $tmpdir"
     cp *.txt $tmpdir
     tar -czf archive.tar.gz $tmpdir
 end
-
-with_tempdir                       # Temp dir is automatically cleaned up
 ```
 
-### LIFO Execution Order
+Multiple defers execute in reverse order (LIFO).
 
-Multiple defers execute in reverse order (last in, first out):
+---
 
-```sh
-fun setup_and_teardown
-    defer print "3. final cleanup"
-    defer print "2. close connection"
-    defer print "1. release lock"
-    print "doing work..."
-end
-
-setup_and_teardown
-# Output:
-# doing work...
-# 1. release lock
-# 2. close connection
-# 3. final cleanup
-```
-
-### Works with Early Returns
-
-Deferred commands run even when returning early:
+## Comments
 
 ```sh
-fun safe_process
-    var tmpfile (mktemp)
-    defer rm $tmpfile
-
-    if test ! -f input.txt
-        return 1                   # Cleanup still happens
-    end
-
-    cat input.txt > $tmpfile
-    wc -l $tmpfile
-end
+# This is a comment
+echo hello  # inline comment
 ```
 
 ---
 
-# Commands & I/O
+# Interactive Shell
 
-## Pipelines
+Oshen's interactive mode provides a modern editing experience out of the box—no plugins or configuration required.
 
-```sh
-cat file.txt | grep error | wc -l
+## Syntax Highlighting
 
-# Alternative syntax (reads like data flow)
-cat file.txt |> grep error |> wc -l
+Commands, strings, operators, and variables are color-coded as you type:
+
+- **Commands** — Valid commands in green, invalid in red
+- **Keywords** — Control flow (`if`, `for`, `while`, etc.) in blue
+- **Strings** — Quoted strings in yellow
+- **Variables** — `$var` expansions in magenta
+- **Operators** — Pipes, redirects, etc. in cyan
+
+## Autosuggestions
+
+As you type, Oshen shows suggestions from your command history in dimmed text:
+
+- Press **→** or **End** to accept the full suggestion
+- Press **Alt+→** to accept word-by-word
+
+Suggestions are context-aware—commands from your current directory rank highest.
+
+## Tab Completion
+
+Press **Tab** to complete commands and paths:
+
+```shell
+$ ec<Tab>        →  $ echo
+$ cat ~/Doc<Tab> →  $ cat ~/Documents/
 ```
 
----
+## Line Editing
 
-## Redirections
+| Key | Action |
+|-----|--------|
+| **Ctrl+A** / **Home** | Beginning of line |
+| **Ctrl+E** / **End** | End of line |
+| **Ctrl+W** | Delete word before cursor |
+| **Ctrl+U** | Delete to beginning |
+| **Ctrl+K** | Delete to end |
+| **Ctrl+L** | Clear screen |
 
-### Output Redirection
+## History
 
-| Operator | Description |
-|----------|-------------|
-| `>`      | Write stdout (truncate) |
-| `>>`     | Write stdout (append) |
-| `2>`     | Write stderr (truncate) |
-| `2>>`    | Write stderr (append) |
-| `&>`     | Write both stdout and stderr |
-| `2>&1`   | Redirect stderr to stdout |
+Command history is saved to `~/.oshen_history` and persists across sessions.
 
-### Input Redirection
+| Key | Action |
+|-----|--------|
+| **↑** / **Ctrl+P** | Previous command |
+| **↓** / **Ctrl+N** | Next command |
 
-```sh
-sort < unsorted.txt
-wc -l < data.txt
-```
+## Configuration
 
-### Examples
-
-```sh
-# Save output to file
-ls -la > listing.txt
-
-# Append to log
-echo "Done" >> log.txt
-
-# Redirect errors
-./script.sh 2> errors.log
-
-# Combine stderr with stdout in pipeline
-./script.sh 2>&1 | grep ERROR
-```
-
----
-
-## Output Capture
-
-Capture command output directly into variables:
-
-### String Capture (`=>`)
+Oshen loads `~/.oshen_floor` on startup:
 
 ```sh
-git rev-parse --short HEAD => sha
-print "Current commit: $sha"
+# ~/.oshen_floor
 
-whoami => user
-print "Logged in as $user"
-```
+# Add to PATH
+path_prepend PATH /opt/homebrew/bin $HOME/.local/bin
 
-### Lines Capture (`=>@`)
+# Aliases
+alias ll 'ls -la'
+alias gs 'git status'
 
-Split output into a list (one item per line):
-
-```sh
-ls *.txt =>@ files
-for f in $files
-    print "File: $f"
+# Custom prompt
+fun prompt
+    print -n --green (pwd -t) --reset " # "
 end
 ```
-
-> **Tip:** Output capture (`=>`) is great for simple assignments. For inline use, prefer bare parens: `var files (ls *.txt)`
-
----
-
-## Command Substitution
-
-Capture command output inline using `(...)` or `$(...)`:
-
-```sh
-print "Today is "(date +%A)
-var files (ls *.txt)
-
-# Multi-line output becomes a list
-for f in (ls)
-    print "- $f"
-end
-```
-
-### Bare Parens vs Dollar Parens
-
-Both syntaxes work, with a subtle difference:
-
-```sh
-# Bare parens - clean, fish-style (preferred for concatenation)
-echo (whoami)                    # hello
-echo "user: "(whoami)            # user: alice  (concat outside quotes)
-
-# Dollar parens - works inside quotes
-echo "user: $(whoami)"           # user: alice  (interpolated inside quotes)
-```
-
-Use bare `(...)` for cleaner code. Use `$(...)` when you need interpolation inside double quotes.
-
----
-
-## Job Control
-
-Run and manage background processes:
-
-### Background Execution
-
-```sh
-sleep 30 &                   # Run in background
-[1] 12345                    # Job ID and PID
-```
-
-### Managing Jobs
-
-```sh
-jobs                         # List all jobs
-fg 1                         # Bring job 1 to foreground
-bg 1                         # Resume stopped job in background
-fg                           # Foreground most recent job
-```
-
-### Signals
-
-- **Ctrl+C** — Send SIGINT to foreground job
-- **Ctrl+Z** — Stop foreground job, return to prompt
-
----
-
-## Glob Patterns
-
-Oshen expands glob patterns against the filesystem:
-
-```sh
-*.txt                        # All .txt files
-src/*.zig                    # .zig files in src/
-test?.txt                    # test1.txt, testA.txt, etc.
-[abc].txt                    # a.txt, b.txt, or c.txt
-[a-z].txt                    # Single lowercase letter .txt
-[!0-9].txt                   # Not starting with a digit
-```
-
-| Pattern | Matches |
-|---------|----------|
-| `*` | Any sequence of characters |
-| `**` | Any directory depth (recursive) |
-| `?` | Any single character |
-| `[abc]` | Any character in the set |
-| `[a-z]` | Any character in the range |
-| `[!abc]` or `[^abc]` | Any character NOT in the set |
-
-### Recursive Globbing
-
-Use `**` to match files across any directory depth:
-
-```sh
-**/*.zig                     # All .zig files anywhere
-src/**/*.zig                 # All .zig files under src/
-**/*_test.zig                # All test files anywhere
-```
-
-Globs are **suppressed in quotes**:
-
-```sh
-echo "*.txt"                 # Literal: *.txt
-echo *.txt                   # Expanded: file1.txt file2.txt ...
-```
-
-If no files match, the pattern is passed through literally.
-
-## Brace Expansion
-
-Brace expansion provides an explicit syntax for Cartesian products with globs, variables, and literal lists.
-
-### Comma-Separated Lists
-
-```sh
-echo {a,b,c}                 # a b c
-echo prefix_{x,y,z}          # prefix_x prefix_y prefix_z
-echo {hello,goodbye}_world   # hello_world goodbye_world
-```
-
-### Globs with Prefixes/Suffixes
-
-Braces enable you to add literal text to each glob match:
-
-```sh
-{*.txt}_backup               # file1.txt_backup file2.txt_backup ...
-test_{*.zig}                 # test_main.zig test_util.zig ...
-```
-
-Without braces, the entire string is treated as one glob pattern:
-```sh
-*.txt_backup                 # Looks for files matching "*.txt_backup"
-{*.txt}_backup               # Globs *.txt first, then appends _backup
-```
-
-### Variables with Suffixes
-
-Apply literal text to each item in a list variable:
-
-```sh
-var files a.txt b.txt c.txt
-echo {$files}_backup         # a.txt_backup b.txt_backup c.txt_backup
-```
-
-Oshen also supports this with the multi-part word syntax:
-```sh
-echo $files"_backup"         # Same result as above
-```
-
-### Nested Braces (Cartesian Product)
-
-Multiple braces create a cartesian product:
-
-```sh
-{a,b}_{x,y}                  # a_x a_y b_x b_y
-test_{1,2}_file_{A,B}.txt    # test_1_file_A.txt test_1_file_B.txt
-                             # test_2_file_A.txt test_2_file_B.txt
-```
-
-### When to Use Braces
-
-- **Explicit globs with affixes**: `{*.txt}_backup` makes it clear you're appending to glob results
-- **Literal lists**: `{dev,staging,prod}_config.json` is more explicit than other approaches
-- **Nested cartesians**: `{a,b}_{1,2}` clearly shows the multiplicative expansion
-- **Alternative to quotes**: Some prefer `{$var}_suffix` over `$var"_suffix"` for clarity
-
-Both syntaxes work—choose based on readability preference!
 
 ---
 
@@ -1053,6 +697,7 @@ Both syntaxes work—choose based on readability preference!
 | `false` | Return failure (exit 1) |
 | `fg [n]` | Bring job to foreground |
 | `jobs` | List background/stopped jobs |
+| `list [OPTIONS] [ITEMS...] [@VAR]` | List manipulation (sort, unique, reverse, contains, length, append, prepend) |
 | `path_prepend VAR path...` | Prepend paths to a variable (deduplicates) |
 | `pwd [-t]` | Print working directory (`-t`: replace $HOME with ~) |
 | `range [FIRST] LAST [-s STEP]` | Print a sequence of numbers (auto-detects direction) |
@@ -1115,167 +760,41 @@ var count 5
 if [ $count -gt 0 ]; print "count is positive"; end
 ```
 
-### Numeric Operations
+### Arithmetic with `calc` / `=`
 
-#### Arithmetic with `calc` / `=`
-
-The `calc` builtin (or its expressive `=` alias) evaluates arithmetic expressions:
+The `=` builtin (alias: `calc`) evaluates arithmetic expressions:
 
 ```sh
 = 2 + 3                          # 5
-calc 10 - 3                      # 7
+= 4 x 5                          # 20 (use x for multiplication—no quoting needed)
 = 20 / 4                         # 5 (integer division)
 = 17 % 5                         # 2 (modulo)
-= 4 x 5                          # 20 (x as multiplication - no quoting needed!)
+var y (= $x + 3)                 # use in assignments
+= "(2 + 3) x 4"                  # 20 (quote expressions with parentheses)
 ```
 
-The `=` alias reads naturally: `var sum (= $a + $b)` → "sum equals a plus b"
+Operators: `+`, `-`, `x` or `*`, `/`, `%`, `()`. Standard precedence applies.
 
-#### Multiplication with `x` or `*`
-
-For multiplication, use `x` (no quoting needed) or `*` (requires quoting):
-
-```sh
-# Use x - clean and simple (recommended)
-= 4 x 5                          # 20
-= 2 x 3 x 4                      # 24
-
-# Or quote * if you prefer the traditional operator
-= "4 * 5"                        # 20
-= "(2 + 3) * 4"                  # 20
-```
-
-The `x` operator reads naturally: "4 times 5"
-
-**Quoting Parentheses**
-
-Since `(` triggers command substitution, quote complex expressions with parentheses:
-
-```sh
-= "(2 + 3) x 4"                  # 20 (parentheses for grouping)
-= "((2 + 3) x 2) + 1"            # 11 (nested parentheses)
-```
-
-**Operator Precedence**
-
-Multiplication (both `x` and `*`), division, and modulo bind tighter than addition/subtraction:
-
-```sh
-= 2 + 3 x 4                      # 14 (not 20)
-= "(2 + 3) x 4"                  # 20 (parens override)
-```
-
-**With Variables and Loops**
-
-```sh
-var x 5
-var y (= $x + 3)                 # y = 8
-
-# Countdown loop
-var count 5
-while test $count -gt 0
-    print "Countdown: $count"
-    var count (= $count - 1)
-end
-
-# Sum a list
-var sum 0
-for i in 1 2 3 4 5
-    var sum (= $sum + $i)
-end
-print "Sum: $sum"                # Sum: 15
-```
-
-**Supported Operators**
-
-| Operator | Description |
-|----------|-------------|
-| `+` | Addition |
-| `-` | Subtraction (also unary minus) |
-| `x` | Multiplication (no quoting needed) |
-| `*` | Multiplication (requires quoting) |
-| `/` | Integer division |
-| `%` | Modulo |
-| `()` | Grouping (requires quoting) |
-
-#### Incrementing with `increment`
-
-The `increment` builtin provides a clean way to increment (or decrement) numeric variables:
+### Incrementing with `increment`
 
 ```sh
 var count 0
 increment count                  # count = 1
-increment count                  # count = 2
-increment count --by 5           # count = 7
-increment count --by -3          # count = 4 (decrement)
-```
-
-This is much cleaner than `var count (= $count + 1)` for the common case of incrementing counters, especially in loops and test frameworks.
-
-**Syntax:**
-- `increment <var>` — Increment by 1 (default)
-- `increment <var> --by <n>` — Increment by n (can be negative for decrement)
-
-**Examples:**
-```sh
-# Test counter
-var PASS 0
-increment PASS                   # PASS = 1
-
-# Custom increment
-var score 100
-increment score --by 50          # score = 150
-
-# Decrement
-var lives 3
-increment lives --by -1          # lives = 2
+increment count --by 5           # count = 6
+increment count --by -2          # count = 4 (decrement)
 ```
 
 ### Generating Sequences with `range`
 
-The `range` builtin prints sequences of numbers, perfect for loops and data generation:
-
 ```sh
-range 5                          # 1 2 3 4 5 (newline-separated)
+range 5                          # 1 2 3 4 5
 range 3 7                        # 3 4 5 6 7
 range 10 1                       # 10 9 8 ... 1 (auto-detects countdown)
-range --step 2 1 10              # 1 3 5 7 9
-range -s 2 1 10                  # Same as above (short form)
-```
+range -s 2 1 10                  # 1 3 5 7 9 (step by 2)
 
-**Syntax:**
-- `range LAST` — Count from 1 to LAST
-- `range FIRST LAST` — Count from FIRST to LAST
-- `range -s STEP FIRST LAST` — Count with custom step
-
-**Options:**
-| Option | Description |
-|--------|-------------|
-| `-s`, `--step N` | Increment between numbers (default: 1 or -1) |
-| `-S`, `--separator S` | Separator between numbers (default: newline) |
-
-**Examples:**
-```sh
-# Use in loops
 for i in (range 1 5)
     print "Item $i"
 end
-
-# Custom separator
-range -S ", " 1 5                # 1, 2, 3, 4, 5
-
-# Generate test data
-for n in (range 100 1)
-    print "Countdown: $n"
-end
-```
-
-**Smart Direction Detection:**
-
-If FIRST > LAST and no step is given, `range` automatically counts down:
-```sh
-range 5 1                        # 5 4 3 2 1 (auto-detected)
-range --step -1 5 1              # Same, but explicit
 ```
 
 ### String Manipulation with `string`

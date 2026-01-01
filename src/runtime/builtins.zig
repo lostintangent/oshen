@@ -5,6 +5,20 @@
 
 const std = @import("std");
 
+/// Prefix for explicitly referencing builtins (e.g., "oshen:echo" bypasses aliases/functions)
+pub const builtin_prefix = "oshen:";
+
+/// Normalize a command name by stripping the builtin prefix if present.
+/// This allows users to explicitly reference builtins when shadowed by aliases/functions.
+inline fn normalizeBuiltinName(name: []const u8) []const u8 {
+    if (name.len > builtin_prefix.len and
+        std.mem.eql(u8, name[0..builtin_prefix.len], builtin_prefix))
+    {
+        return name[builtin_prefix.len..];
+    }
+    return name;
+}
+
 // Re-export types commonly needed by builtin implementations
 pub const State = @import("state.zig").State;
 pub const ExpandedCommand = @import("../interpreter/expansion/pipeline.zig").ExpandedCommand;
@@ -55,7 +69,7 @@ const bg_builtin = @import("builtins/bg.zig");
 const var_builtin = @import("builtins/var.zig");
 const unset_builtin = @import("builtins/unset.zig");
 const export_builtin = @import("builtins/export.zig");
-pub const source_builtin = @import("builtins/source.zig");
+const source_builtin = @import("builtins/source.zig");
 const eval_builtin = @import("builtins/eval.zig");
 const true_builtin = @import("builtins/true.zig");
 const false_builtin = @import("builtins/false.zig");
@@ -71,6 +85,7 @@ const increment_builtin = @import("builtins/increment.zig");
 const terminal_builtin = @import("builtins/terminal.zig");
 const range_builtin = @import("builtins/range.zig");
 const string_builtin = @import("builtins/string.zig");
+const list_builtin = @import("builtins/list.zig");
 
 /// All registered builtins - single source of truth
 const all_builtins = [_]Builtin{
@@ -101,6 +116,7 @@ const all_builtins = [_]Builtin{
     terminal_builtin.builtin,
     range_builtin.builtin,
     string_builtin.builtin,
+    list_builtin.builtin,
 };
 
 /// Compile-time map for O(1) builtin lookup (built from all_builtins)
@@ -130,7 +146,7 @@ pub fn getNames() []const []const u8 {
 pub fn tryRun(st: *State, cmd: ExpandedCommand) ?u8 {
     if (cmd.argv.len == 0) return null;
 
-    const name = cmd.argv[0];
+    const name = normalizeBuiltinName(cmd.argv[0]);
 
     if (builtin_map.get(name)) |builtin| {
         // Check for -h or --help as first argument
@@ -148,9 +164,9 @@ pub fn tryRun(st: *State, cmd: ExpandedCommand) ?u8 {
     return null; // Not a builtin
 }
 
-/// Check if a command name is a builtin
+/// Check if a command name is a builtin (handles osh: prefix)
 pub fn isBuiltin(name: []const u8) bool {
-    return builtin_map.has(name);
+    return builtin_map.has(normalizeBuiltinName(name));
 }
 
 // =============================================================================
@@ -201,4 +217,53 @@ pub fn joinArgsToBuffer(args: []const []const u8, buf: []u8) ?[]const u8 {
         pos += arg.len;
     }
     return buf[0..pos];
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+test "normalizeBuiltinName: strips oshen: prefix" {
+    try testing.expectEqualStrings("echo", normalizeBuiltinName("oshen:echo"));
+    try testing.expectEqualStrings("string", normalizeBuiltinName("oshen:string"));
+    try testing.expectEqualStrings("cd", normalizeBuiltinName("oshen:cd"));
+}
+
+test "normalizeBuiltinName: preserves names without prefix" {
+    try testing.expectEqualStrings("echo", normalizeBuiltinName("echo"));
+    try testing.expectEqualStrings("string", normalizeBuiltinName("string"));
+    try testing.expectEqualStrings("my-command", normalizeBuiltinName("my-command"));
+}
+
+test "normalizeBuiltinName: handles edge cases" {
+    // Too short to have prefix
+    try testing.expectEqualStrings("oshen", normalizeBuiltinName("oshen"));
+    try testing.expectEqualStrings("oshen:", normalizeBuiltinName("oshen:"));
+    // Different prefix
+    try testing.expectEqualStrings("fish:echo", normalizeBuiltinName("fish:echo"));
+    // Empty string
+    try testing.expectEqualStrings("", normalizeBuiltinName(""));
+}
+
+test "isBuiltin: recognizes prefixed builtins" {
+    try testing.expect(isBuiltin("oshen:echo"));
+    try testing.expect(isBuiltin("oshen:cd"));
+    try testing.expect(isBuiltin("oshen:string"));
+    try testing.expect(isBuiltin("oshen:pwd"));
+}
+
+test "isBuiltin: recognizes unprefixed builtins" {
+    try testing.expect(isBuiltin("echo"));
+    try testing.expect(isBuiltin("cd"));
+    try testing.expect(isBuiltin("string"));
+    try testing.expect(isBuiltin("pwd"));
+}
+
+test "isBuiltin: rejects non-builtins" {
+    try testing.expect(!isBuiltin("notabuiltin"));
+    try testing.expect(!isBuiltin("oshen:notabuiltin"));
+    try testing.expect(!isBuiltin("ls"));
+    try testing.expect(!isBuiltin("oshen:ls"));
 }

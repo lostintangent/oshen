@@ -9,7 +9,7 @@ const State = @import("state.zig").State;
 const env = @import("env.zig");
 
 /// How a command name resolves
-pub const Resolution = union(enum) {
+pub const CommandResolution = union(enum) {
     alias: []const u8, // expansion text
     builtin,
     function,
@@ -17,25 +17,31 @@ pub const Resolution = union(enum) {
     not_found,
 };
 
-/// Resolve how a command name would be interpreted
-pub fn resolve(state: ?*State, name: []const u8) Resolution {
-    // Check aliases first
+/// Resolve how a command name would be interpreted.
+/// Resolution order: aliases (if included) → functions → builtins → external.
+///
+/// By default, aliases are included. Pass `false` for execution contexts
+/// where aliases have already been expanded.
+pub fn resolveCommand(state: ?*State, name: []const u8, include_aliases: bool) CommandResolution {
+    // Check aliases first (unless skipped for execution)
+    if (include_aliases) {
+        if (state) |s| {
+            if (s.getAlias(name)) |expansion| {
+                return .{ .alias = expansion };
+            }
+        }
+    }
+
+    // Check user-defined functions (allows shadowing builtins)
     if (state) |s| {
-        if (s.getAlias(name)) |expansion| {
-            return .{ .alias = expansion };
+        if (s.getFunction(name) != null) {
+            return .function;
         }
     }
 
     // Check builtins
     if (builtins.isBuiltin(name)) {
         return .builtin;
-    }
-
-    // Check user-defined functions
-    if (state) |s| {
-        if (s.getFunction(name) != null) {
-            return .function;
-        }
     }
 
     // Check PATH
@@ -46,9 +52,9 @@ pub fn resolve(state: ?*State, name: []const u8) Resolution {
     return .not_found;
 }
 
-/// Check if a command name resolves to something valid
-pub fn isValid(state: ?*State, name: []const u8) bool {
-    return resolve(state, name) != .not_found;
+/// Check if a command name resolves to something valid (includes aliases)
+pub fn isValidCommand(state: ?*State, name: []const u8) bool {
+    return resolveCommand(state, name, true) != .not_found;
 }
 
 /// Find a command in PATH, returns full path or null

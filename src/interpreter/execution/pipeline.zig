@@ -11,6 +11,7 @@ const expansion_pipeline = @import("../expansion/pipeline.zig");
 const state_mod = @import("../../runtime/state.zig");
 const State = state_mod.State;
 const builtins = @import("../../runtime/builtins.zig");
+const resolve = @import("../../runtime/resolve.zig");
 const io = @import("../../terminal/io.zig");
 const redirect = @import("redirect.zig");
 const signals = @import("signals.zig");
@@ -44,32 +45,33 @@ pub fn buildArgv(allocator: std.mem.Allocator, cmd: ExpandedCommand) !std.ArrayL
     return argv;
 }
 
-/// Execute a pipeline in foreground, checking for aliases, builtins, and functions first
+/// Execute a pipeline in foreground, checking functions then builtins (aliases already expanded)
 pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, commands: []const ExpandedCommand, tryRunFunction: FunctionExecutor) !u8 {
     if (commands.len == 0) return 0;
 
-    // Single command - check for builtin first, then functions
+    // Single command - try to run in-process if possible
     if (commands.len == 1) {
         const cmd = commands[0];
         if (cmd.argv.len > 0) {
-            // Check if it's a builtin
-            if (builtins.isBuiltin(cmd.argv[0])) {
-                // Builtin with redirections - handle specially (in-process when possible)
-                if (cmd.redirects.len > 0) {
-                    return try executeBuiltinWithRedirects(allocator, state, cmd);
-                }
-                // No redirections - run builtin directly
-                if (builtins.tryRun(state, cmd)) |status| {
-                    return status;
-                }
-            }
-            // Then user-defined functions
-            if (cmd.redirects.len > 0) {
-                if (state.getFunction(cmd.argv[0])) |_| {
-                    return try executeFunctionWithRedirects(allocator, state, cmd, tryRunFunction);
-                }
-            } else if (tryRunFunction(allocator, state, cmd)) |status| {
-                return status;
+            // Use centralized resolution (functions before builtins, aliases already expanded)
+            switch (resolve.resolveCommand(state, cmd.argv[0], false)) {
+                .function => {
+                    if (cmd.redirects.len > 0) {
+                        return try executeFunctionWithRedirects(allocator, state, cmd, tryRunFunction);
+                    }
+                    if (tryRunFunction(allocator, state, cmd)) |status| {
+                        return status;
+                    }
+                },
+                .builtin => {
+                    if (cmd.redirects.len > 0) {
+                        return try executeBuiltinWithRedirects(allocator, state, cmd);
+                    }
+                    if (builtins.tryRun(state, cmd)) |status| {
+                        return status;
+                    }
+                },
+                .alias, .external, .not_found => {},
             }
         }
         return try forkPipeline(allocator, state, commands, tryRunFunction);
@@ -245,27 +247,27 @@ pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, comm
 fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCommand, tryRunFunction: ?FunctionExecutor) !u8 {
     if (cmd.argv.len == 0) return 0;
 
-    // Builtin fast paths
-    if (builtins.isBuiltin(cmd.argv[0])) {
-        if (cmd.redirects.len > 0) {
-            return try executeBuiltinWithRedirects(allocator, state, cmd);
-        }
-        if (builtins.tryRun(state, cmd)) |status| {
-            return status;
-        }
-    }
-
-    // Functions (only when provided)
-    if (tryRunFunction) |f| {
-        if (cmd.argv.len > 0) {
-            if (cmd.redirects.len > 0) {
-                if (state.getFunction(cmd.argv[0])) |_| {
+    // Use centralized resolution (functions before builtins, aliases already expanded)
+    switch (resolve.resolveCommand(state, cmd.argv[0], false)) {
+        .function => {
+            if (tryRunFunction) |f| {
+                if (cmd.redirects.len > 0) {
                     return try executeFunctionWithRedirects(allocator, state, cmd, f);
                 }
-            } else if (f(allocator, state, cmd)) |status| {
+                if (f(allocator, state, cmd)) |status| {
+                    return status;
+                }
+            }
+        },
+        .builtin => {
+            if (cmd.redirects.len > 0) {
+                return try executeBuiltinWithRedirects(allocator, state, cmd);
+            }
+            if (builtins.tryRun(state, cmd)) |status| {
                 return status;
             }
-        }
+        },
+        .alias, .external, .not_found => {},
     }
 
     return try executeCommandSimple(allocator, cmd);
@@ -309,11 +311,12 @@ pub fn forkPipeline(allocator: std.mem.Allocator, state: *State, commands: []con
     var pgid: std.posix.pid_t = 0;
 
     // Check if first command can run in-process (builtin, no redirects, pipeline has >1 command)
+    // Use centralized resolution to respect function shadowing
     const first_cmd = commands[0];
     const first_is_inline_builtin = n > 1 and
         first_cmd.argv.len > 0 and
         first_cmd.redirects.len == 0 and
-        builtins.isBuiltin(first_cmd.argv[0]);
+        resolve.resolveCommand(state, first_cmd.argv[0], false) == .builtin;
 
     // If first command is a simple builtin, run it in-process writing to the pipe
     if (first_is_inline_builtin) {
@@ -454,15 +457,22 @@ pub fn execCommandWithState(allocator: std.mem.Allocator, state: ?*State, tryRun
         std.posix.exit(1);
     };
 
-    // If we have state, try running as builtin first
+    // If we have state, use centralized resolution (functions before builtins, aliases already expanded)
     if (state) |s| {
-        if (cmd.argv.len > 0 and builtins.isBuiltin(cmd.argv[0])) {
-            const status = builtins.tryRun(s, cmd) orelse 127;
-            std.posix.exit(status);
-        }
-        if (tryRunFunction) |f| {
-            if (f(allocator, s, cmd)) |status| {
-                std.posix.exit(status);
+        if (cmd.argv.len > 0) {
+            switch (resolve.resolveCommand(s, cmd.argv[0], false)) {
+                .function => {
+                    if (tryRunFunction) |f| {
+                        if (f(allocator, s, cmd)) |status| {
+                            std.posix.exit(status);
+                        }
+                    }
+                },
+                .builtin => {
+                    const status = builtins.tryRun(s, cmd) orelse 127;
+                    std.posix.exit(status);
+                },
+                .alias, .external, .not_found => {},
             }
         }
     }

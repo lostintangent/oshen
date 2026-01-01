@@ -137,11 +137,7 @@ pub const Parser = struct {
     fn peekBareWord(self: *const Parser) ?[]const u8 {
         const tok = self.peek() orelse return null;
         if (tok.kind != .word) return null;
-        const segs = tok.kind.word;
-        if (segs.len == 1 and segs[0].quotes == .none) {
-            return segs[0].text;
-        }
-        return null;
+        return token_types.getBareText(tok.kind.word);
     }
 
     /// Returns true if current token is a separator (newline or semicolon).
@@ -188,13 +184,9 @@ pub const Parser = struct {
     // =========================================================================
 
     /// Extracts a simple unquoted word's text from a token.
-    /// Returns null if the token is not a single unquoted word segment.
+    /// Returns null if the token is not a single unquoted word part.
     fn extractSimpleWord(tok: Token) ?[]const u8 {
-        const segs = tok.kind.word;
-        if (segs.len == 1 and segs[0].quotes == .none) {
-            return segs[0].text;
-        }
-        return null;
+        return token_types.getBareText(tok.kind.word);
     }
 
     /// Result of parsing an environment variable assignment.
@@ -203,7 +195,7 @@ pub const Parser = struct {
     /// Attempts to parse a word as an environment variable assignment (KEY=value).
     /// Returns the key-value pair if valid, null otherwise.
     fn tryParseEnvAssignment(word_parts: []const WordPart) ?EnvAssignment {
-        // Only unquoted single-segment words can be assignments
+        // Only unquoted single-part words can be assignments
         if (word_parts.len != 1 or word_parts[0].quotes != .none) return null;
 
         const text = word_parts[0].text;
@@ -381,10 +373,9 @@ pub const Parser = struct {
     fn isPrevTokenElse(self: *const Parser) bool {
         if (self.pos == 0) return false;
         const prev_tok = self.tokens[self.pos - 1];
-        return prev_tok.kind == .word and
-            prev_tok.kind.word.len == 1 and
-            prev_tok.kind.word[0].quotes == .none and
-            std.mem.eql(u8, prev_tok.kind.word[0].text, "else");
+        if (prev_tok.kind != .word) return false;
+        const text = token_types.getBareText(prev_tok.kind.word) orelse return false;
+        return std.mem.eql(u8, text, "else");
     }
 
     /// Scans forward to find a block terminator, handling nested blocks.

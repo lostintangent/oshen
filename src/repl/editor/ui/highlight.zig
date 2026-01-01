@@ -6,6 +6,7 @@
 //! - Keywords (if, for, while, etc.) → blue
 //! - Variables ($foo, $1, $HOME) → bright magenta
 //! - Glob patterns (*, **, ?) → bright magenta
+//! - Brace expansion ({a,b}, {1..5}) → bright magenta
 //! - Tilde expansion (~, ~/path) → bright magenta
 //! - Quoted strings → yellow
 //! - Number literals → yellow
@@ -67,7 +68,7 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
 
         const text = input[start..end];
         const color: ?[]const u8 = switch (token.kind) {
-            .word => |segs| ctx.wordColor(segs, text, start),
+            .word => |parts| ctx.wordColor(parts, text, start),
             .operator => ansi.cyan,
             .separator => ansi.dim,
         };
@@ -96,9 +97,10 @@ const Context = struct {
     cmd_cache: CommandCache,
 
     /// Determine the highlight color for a word token, or null for no highlighting.
-    fn wordColor(self: *Context, segs: []const tokens.WordPart, text: []const u8, start: usize) ?[]const u8 {
-        const is_bare = segs.len == 1 and segs[0].quotes == .none;
-        const bare_text = if (is_bare) segs[0].text else text;
+    fn wordColor(self: *Context, parts: []const tokens.WordPart, text: []const u8, start: usize) ?[]const u8 {
+        const maybe_bare = tokens.getBareText(parts);
+        const bare_text = maybe_bare orelse text;
+        const is_bare = maybe_bare != null;
 
         // Keywords (highest priority)
         if (is_bare and tokens.isKeyword(bare_text)) return ansi.blue;
@@ -111,9 +113,13 @@ const Context = struct {
             return if (self.cmd_cache.isValid(bare_text)) ansi.green else ansi.red;
         }
 
-        // Quoted strings
-        for (segs) |seg| {
-            if (seg.quotes != .none) return ansi.yellow;
+        // Brace expansion, quoted strings
+        for (parts) |part| {
+            switch (part.quotes) {
+                .brace => return ansi.bright_magenta,
+                .double, .single => return ansi.yellow,
+                else => {},
+            }
         }
 
         // Glob patterns
@@ -135,7 +141,7 @@ const Context = struct {
 
         fn isValid(self: *CommandCache, cmd: []const u8) bool {
             if (self.map.get(cmd)) |valid| return valid;
-            const valid = resolve.isValid(self.state, cmd);
+            const valid = resolve.isValidCommand(self.state, cmd);
             self.map.put(cmd, valid) catch {};
             return valid;
         }
@@ -251,6 +257,8 @@ test "Words: variables and expansions are bright magenta" {
     try expectHighlight("echo **/*.zig", ansi.bright_magenta); // recursive glob
     try expectHighlight("cd ~", ansi.bright_magenta); // tilde
     try expectHighlight("ls ~/Documents", ansi.bright_magenta); // tilde path
+    try expectHighlight("echo {a,b,c}", ansi.bright_magenta); // brace expansion
+    try expectHighlight("echo {1..5}", ansi.bright_magenta); // brace range
 }
 
 test "Words: literals - strings and numbers" {
