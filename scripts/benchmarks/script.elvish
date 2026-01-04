@@ -1,0 +1,55 @@
+#!/usr/bin/env elvish
+# Shell benchmark: loops, functions, conditionals, globs, pipelines, external commands
+
+var count = 0
+
+fn process-file {
+    if (eq (% $count 2) 0) {
+        set count = (+ $count 2)
+    } else {
+        set count = (+ $count 1)
+    }
+}
+
+var i = 0
+while (< $i 100) {
+    set count = 0
+
+    # Glob iteration with function calls
+    for f [/usr/bin/*] {
+        process-file
+    }
+
+    # External command execution
+    /usr/bin/true
+
+    # Pipeline with redirection
+    echo "test data" | cat > /dev/null
+
+    # Command substitution (external)
+    var ts = (date +%s)
+
+    # String interpolation
+    var msg = "Iteration "$i" completed at "$ts
+
+    # Logical chaining
+    var found = 0
+    var missing = 0
+    if ?(test -f /usr/bin/ls) { set found = 1 }
+    if (not ?(test -f /nonexistent)) { set missing = 1 }
+
+    # Array indexing
+    var items = [alpha beta gamma delta epsilon]
+    var first = $items[0]
+    var last = $items[-1]
+    var slice = $items[1..4]
+
+    # Nested loops
+    for outer [1 2 3] {
+        for inner [a b c] {
+            var pair = $outer$inner
+        }
+    }
+
+    set i = (+ $i 1)
+}

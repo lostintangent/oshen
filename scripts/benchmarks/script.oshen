@@ -1,0 +1,51 @@
+#!../../zig-out/bin/oshen
+# Shell benchmark: loops, functions, conditionals, globs, pipelines, external commands
+
+fun process_file
+    if test (= $count % 2) -eq 0
+        set count (= $count + 2)
+    else
+        increment count
+    end
+end
+
+var i 0
+while test $i -lt 100
+    set count 0
+
+    # Glob iteration with function calls
+    each f in /usr/bin/*
+        process_file
+    end
+
+    # External command execution
+    /usr/bin/true
+
+    # Pipeline with redirection
+    echo "test data" | cat > /dev/null
+
+    # Command substitution (external)
+    var ts (date +%s)
+
+    # String interpolation
+    var msg "Iteration $i completed at $ts"
+
+    # Logical chaining
+    test -f /usr/bin/ls && var found 1
+    test -f /nonexistent || var missing 1
+
+    # Array indexing
+    var items alpha beta gamma delta epsilon
+    var first $items[1]
+    var last $items[-1]
+    var slice $items[2..4]
+
+    # Nested loops
+    each outer in 1 2 3
+        each inner in a b c
+            var pair "$outer$inner"
+        end
+    end
+
+    increment i
+end

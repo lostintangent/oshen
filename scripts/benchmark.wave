@@ -1,0 +1,19 @@
+#!./zig-out/bin/oshen
+
+var BENCH_PREFIX (pwd)/scripts/benchmarks/script
+
+zig build -Doptimize=ReleaseFast
+
+print --bold "Startup Time"
+hyperfine --warmup 3 --runs 10 -N \
+    -n oshen './zig-out/bin/oshen -c "echo hello"' \
+    -n zsh 'zsh -c "echo hello"' \
+    -n fish 'fish -c "echo hello"' \
+    -n elvish 'elvish -c "echo hello"'
+
+print -nl --bold "Script Execution"
+hyperfine --warmup 3 --runs 10 -N \
+    -n oshen "./zig-out/bin/oshen $BENCH_PREFIX.oshen" \
+    -n zsh "zsh $BENCH_PREFIX.zsh" \
+    -n fish "fish $BENCH_PREFIX.fish" \
+    -n elvish "elvish $BENCH_PREFIX.elvish"

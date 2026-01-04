@@ -1,0 +1,106 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux-musl
+            artifact: oshen-linux-x86_64
+          - os: macos-latest
+            target: native
+            artifact: oshen-macos-arm64
+          - os: macos-15
+            target: native
+            artifact: oshen-macos-x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.target }}" = "native" ]; then
+            zig build -Doptimize=ReleaseFast
+          else
+            zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
+          fi
+
+      - name: Strip binary
+        run: strip zig-out/bin/oshen
+
+      - name: Create tarball
+        run: |
+          cd zig-out/bin
+          tar -czvf ${{ matrix.artifact }}.tar.gz oshen
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: zig-out/bin/${{ matrix.artifact }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "version=$(cat scripts/VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compute SHA256 hashes
+        id: sha
+        run: |
+          echo "linux=$(sha256sum artifacts/oshen-linux-x86_64/oshen-linux-x86_64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "macos_arm64=$(sha256sum artifacts/oshen-macos-arm64/oshen-macos-arm64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "macos_x86_64=$(sha256sum artifacts/oshen-macos-x86_64/oshen-macos-x86_64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Update formula
+        run: |
+          awk -v arm64="${{ steps.sha.outputs.macos_arm64 }}" \
+              -v x86_64="${{ steps.sha.outputs.macos_x86_64 }}" \
+              -v linux="${{ steps.sha.outputs.linux }}" '
+            /oshen-macos-arm64/ { print; getline; sub(/sha256 ".*"/, "sha256 \"" arm64 "\""); print; next }
+            /oshen-macos-x86_64/ { print; getline; sub(/sha256 ".*"/, "sha256 \"" x86_64 "\""); print; next }
+            /oshen-linux-x86_64/ { print; getline; sub(/sha256 ".*"/, "sha256 \"" linux "\""); print; next }
+            { print }
+          ' Formula/oshen.rb > Formula/oshen.rb.tmp && mv Formula/oshen.rb.tmp Formula/oshen.rb
+
+      - name: Commit formula update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/oshen.rb
+          git commit -m "Update formula for v${{ steps.version.outputs.version }}"
+          git push
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          draft: false
+          files: |
+            artifacts/oshen-linux-x86_64/oshen-linux-x86_64.tar.gz
+            artifacts/oshen-macos-arm64/oshen-macos-arm64.tar.gz
+            artifacts/oshen-macos-x86_64/oshen-macos-x86_64.tar.gz

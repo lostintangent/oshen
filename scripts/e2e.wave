@@ -1,0 +1,912 @@
+#!./zig-out/bin/oshen
+
+# Comprehensive E2E Test Suite for Oshen
+
+var PASS 0
+var FAIL 0
+var TOTAL 0
+
+fun print_header
+    print ""
+    print --blue "═══════════════════════════════════════════════════════════"
+    print --blue "  $1"
+    print --blue "═══════════════════════════════════════════════════════════"
+end
+
+fun test_case
+    var name $1
+    var cmd $2
+    # Interpret escape sequences in expected value
+    echo -n $3 => expected
+
+    increment TOTAL
+    eval "$cmd" => output
+
+    if test "$output" = "$expected"
+        print -n --green "✓ "
+        print "$name"
+        increment PASS
+    else
+        print -n --red "✗ "
+        print "$name"
+        print "  Expected: '$expected'"
+        print "  Got:      '$output'"
+        increment FAIL
+    end
+end
+
+fun test_exit_code
+    var name $1
+    var cmd $2
+    var expected_code $3
+
+    increment TOTAL
+    eval "$cmd"
+    var exit_code $status
+
+    if test $exit_code = $expected_code
+        print -n --green "✓ "
+        print "$name"
+        increment PASS
+    else
+        print -n --red "✗ "
+        print "$name"
+        print "  Expected exit: $expected_code"
+        print "  Got exit:      $exit_code"
+        increment FAIL
+    end
+end
+
+# ============================================================================
+# Basic Variables
+# ============================================================================
+print_header "Basic Variables (11 tests)"
+
+test_case "Simple variable" "var x hello; echo \$x" "hello"
+test_case "Multi-value variable" "var colors red green blue; echo \$colors" "red green blue"
+test_case "Variable reassignment" "var x foo; var x bar; echo \$x" "bar"
+test_case "Empty variable" "var x; echo [\$x]" "[]"
+test_case "Multiple variables" "var a 1; var b 2; echo \$a \$b" "1 2"
+test_case "Variable concatenation" "var a hello; var b world; echo \$a\$b" "helloworld"
+test_case "Numeric variable" "var num 42; echo \$num" "42"
+test_case "Negative number" "var num -42; echo \$num" "-42"
+test_case "Variable with underscore" "var my_var test; echo \$my_var" "test"
+test_case "Variable with equals" "var x = hello; echo \$x" "hello"
+test_case "Unset variable" "var x hello; unset x; echo [\$x]" "[]"
+test_exit_code "Set query nonexistent returns 1" "set NONEXISTENT_VAR_12345" "1"
+
+# ============================================================================
+# Environment Variables
+# ============================================================================
+print_header "Environment Variables (8 tests)"
+
+test_case "Export with value" "export FOO bar; echo \$FOO" "bar"
+test_case "Export equals syntax" "export FOO=bar; echo \$FOO" "bar"
+test_case "Unset shell var" "var X test; unset X; echo [\$X]" "[]"
+test_case "Unset env var" "export Y=test; unset Y; echo [\$Y]" "[]"
+test_exit_code "Unset nonexistent succeeds" "unset NONEXISTENT_VAR_123" "0"
+test_case "Unset multiple mixed" "var A 1; export B=2; unset A B; echo [\$A][\$B]" "[][]"
+test_case "Export with empty string" "export EMPTY=''; echo [\$EMPTY]" "[]"
+test_case "HOME exists" "echo \$HOME" "$HOME"
+
+# ============================================================================
+# Array Indexing
+# ============================================================================
+print_header "Array Indexing (16 tests)"
+
+test_case "First element" "var arr a b c; echo \$arr[1]" "a"
+test_case "Second element" "var arr a b c; echo \$arr[2]" "b"
+test_case "Last element" "var arr a b c; echo \$arr[3]" "c"
+test_case "Negative index -1" "var arr a b c; echo \$arr[-1]" "c"
+test_case "Negative index -2" "var arr a b c; echo \$arr[-2]" "b"
+test_case "Slice 1..2" "var arr a b c d; echo \$arr[1..2]" "a b"
+test_case "Slice 2..4" "var arr a b c d e; echo \$arr[2..4]" "b c d"
+test_case "Slice from start" "var arr a b c d; echo \$arr[..2]" "a b"
+test_case "Slice to end" "var arr a b c d; echo \$arr[3..]" "c d"
+test_case "Full slice" "var arr a b c; echo \$arr[1..]" "a b c"
+test_case "Single element slice" "var arr a b c; echo \$arr[2..2]" "b"
+test_case "Negative slice" "var arr a b c d; echo \$arr[-2..-1]" "c d"
+test_case "Out of bounds positive" "var arr a b c; echo [\$arr[10]]" "[]"
+test_case "Index single item" "var single x; echo \$single[1]" "x"
+test_case "Index empty array" "var empty; echo [\$empty[1]]" "[]"
+test_case "Cartesian prefix" "var xs a b; echo pre\$xs" "prea preb"
+
+# ============================================================================
+# Brace Expansion
+# ============================================================================
+print_header "Brace Expansion (20 tests)"
+
+test_case "Simple brace list" "echo {a,b,c}" "a b c"
+test_case "Brace with prefix" "echo pre_{a,b,c}" "pre_a pre_b pre_c"
+test_case "Brace with suffix" "echo {a,b,c}_post" "a_post b_post c_post"
+test_case "Brace prefix and suffix" "echo x_{a,b}_y" "x_a_y x_b_y"
+test_case "Nested braces" "echo {a,b}_{1,2}" "a_1 a_2 b_1 b_2"
+test_case "Three-way expansion" "echo {x,y,z}" "x y z"
+test_case "Single item brace" "echo {a}" "a"
+test_case "Multiple brace sets" "echo {1,2} {a,b}" "1 2 a b"
+test_case "Range ascending" "echo {1..5}" "1 2 3 4 5"
+test_case "Range descending" "echo {5..1}" "5 4 3 2 1"
+test_case "Range with prefix" "echo file{1..3}.txt" "file1.txt file2.txt file3.txt"
+test_case "Range negative" "echo {-2..2}" "-2 -1 0 1 2"
+test_case "Range single" "echo {5..5}" "5"
+test_case "Range and list" "echo {1..3} {a,b}" "1 2 3 a b"
+test_case "Range with variable end" "var n 5; echo {1..\$n}" "1 2 3 4 5"
+test_case "Range with variable start" "var n 3; echo {\$n..1}" "3 2 1"
+test_case "Range with both variables" "var a 2; var b 4; echo {\$a..\$b}" "2 3 4"
+test_case "Range variable with prefix" "var n 3; echo file{1..\$n}.txt" "file1.txt file2.txt file3.txt"
+test_case "Range variable descending" "var n 5; echo {\$n..1}" "5 4 3 2 1"
+test_case "Range variable list uses first" "var n 3 5 7; echo {1..\$n}" "1 2 3"
+
+# ============================================================================
+# Quoting and Escaping
+# ============================================================================
+print_header "Quoting and Escaping (10 tests)"
+
+test_case "Single quotes literal" "echo '\$world'" "\$world"
+test_case "Double quotes expand" "var x test; echo \"value: \$x\"" "value: test"
+test_case "Empty string" 'echo ""' ""
+test_case "Whitespace preservation" 'echo "a  b  c"' "a  b  c"
+test_case "Single quote in double" 'echo "it'"'"'s working"' "it's working"
+test_case "Quote empty var" "var x; echo \"\$x\"" ""
+test_case "Mixed quotes" 'echo "test'"'"'s"' "test's"
+test_case "Backslash space" "echo hello\\ world" "hello world"
+test_case "Dollar literal" 'echo \$literal' "\$literal"
+test_case "Special chars in string" 'echo "hello@#\$%"' "hello@#\$%"
+
+# ============================================================================
+# Command Substitution
+# ============================================================================
+print_header "Command Substitution (16 tests)"
+
+test_case "Basic substitution" 'echo $(echo hello)' "hello"
+test_case "Substitution in string" 'echo "result: $(echo test)"' "result: test"
+test_case "Multiple substitutions" 'echo $(echo a) $(echo b)' "a b"
+test_case "Nested substitution" 'echo $(echo $(echo nested))' "nested"
+test_case "Substitution with variable" 'var x world; echo $(echo $x)' "world"
+test_case "Empty substitution" 'echo [$(echo)]' "[]"
+test_case "Substitution arithmetic" 'echo (= 2 + 2)' "4"
+test_case "Multi-word substitution" 'echo $(echo one two)' "one two"
+
+# Bare paren syntax (fish-style)
+test_case "Bare paren basic" 'echo (echo hello)' "hello"
+test_case "Bare paren in string concat" 'echo "result: "(echo test)' "result: test"
+test_case "Bare paren nested" 'echo (echo (echo nested))' "nested"
+test_case "Bare paren with variable" 'var x world; echo (echo $x)' "world"
+test_case "Bare paren concatenation" 'echo prefix_(echo middle)_suffix' "prefix_middle_suffix"
+test_case "Bare paren with pipe" 'echo (echo hello | cat)' "hello"
+test_case "Quoted paren is literal" 'echo "(not a command)"' "(not a command)"
+test_case "Mixed bare and dollar paren" 'echo (echo a) $(echo b)' "a b"
+
+# ============================================================================
+# Conditionals (If/Else)
+# ============================================================================
+print_header "Conditionals (15 tests)"
+
+test_case "If true" "if true; echo yes; end" "yes"
+test_case "If false" "if false; echo yes; end" ""
+test_case "If else true" "if true; echo yes; else; echo no; end" "yes"
+test_case "If else false" "if false; echo yes; else; echo no; end" "no"
+test_case "If test string eq" 'if test "a" = "a"; echo match; end' "match"
+test_case "If test string ne" 'if test "a" != "b"; echo diff; end' "diff"
+test_case "If test number eq" "if test 5 -eq 5; echo equal; end" "equal"
+test_case "If test number lt" "if test 3 -lt 5; echo less; end" "less"
+test_case "If test number gt" "if test 7 -gt 5; echo greater; end" "greater"
+test_case "If test -z empty" 'if test -z ""; echo empty; end' "empty"
+test_case "If test -n non-empty" 'if test -n "text"; echo nonempty; end' "nonempty"
+test_case "Else if true first" "if test 1 -eq 1; echo first; else if test 2 -eq 2; echo second; end" "first"
+test_case "Else if true second" "if test 1 -eq 2; echo first; else if test 2 -eq 2; echo second; end" "second"
+test_case "Else if all false" "if test 1 -eq 2; echo first; else if test 2 -eq 3; echo second; else; echo third; end" "third"
+test_exit_code "Test not equal" "test 1 -ne 2" "0"
+
+# ============================================================================
+# Loops (Each/For/While)
+# ============================================================================
+print_header "Each Loops (25 tests)"
+
+# Empty variable iteration (should iterate zero times, not once with empty string)
+test_case "Each empty var no iteration" "var empty; for x in \$empty; echo should_not_print; end; echo done" "done"
+test_case "Each undefined no iteration" "for x in \$undefined_var_xyz123; echo should_not_print; end; echo done" "done"
+test_case "Each empty string skipped" "for x in \"\" a \"\" b \"\"; echo -n \$x; end" "ab"
+
+# Each with implicit $item and $index
+test_case "Each implicit item" "each a b c; echo -n \$item; end" "abc"
+test_case "Each implicit index" "each a b c; echo -n \$index; end" "123"
+test_case "Each item and index" "each x y; echo \$item:\$index; end" "x:1
+y:2"
+
+# Each with explicit variable
+test_case "Each with named var" "each val in a b c; echo -n \$val; end" "abc"
+test_case "Each named var has index" "each v in x y; echo \$v-\$index; end" "x-1
+y-2"
+
+# For as alias (same behavior as each)
+test_case "For as each alias" "for a b c; echo -n \$item; end" "abc"
+test_case "For implicit has index" "for x y z; echo -n \$index; end" "123"
+test_case "For with named var" "for v in 1 2 3; echo -n \$v; end" "123"
+
+# Each with variables and command substitution
+test_case "Each with variable list" "var items x y z; each \$items; echo -n \$item; end" "xyz"
+test_case "Each with command sub" "each line in (printf 'a\nb'); echo -n \$line; end" "ab"
+
+# Break and continue in each
+test_case "Each with break" "each 1 2 3 4 5; if test \$item = 3; break; end; echo -n \$item; end" "12"
+test_case "Each with continue" "each 1 2 3 4 5; if test \$item = 3; continue; end; echo -n \$item; end" "1245"
+
+# Nested each loops
+test_case "Nested each loops" "each a b; var outer \$item; each 1 2; echo -n \$outer\$item; end; end" "a1a2b1b2"
+test_case "Nested each index" "each a b; var oi \$index; each 1 2; echo -n \$oi\$index; end; end" "11122122"
+
+# Edge cases
+test_case "Each single item" "each only; echo \$item:\$index; end" "only:1"
+test_case "Each inline form" "each a b c; echo -n \$item; end" "abc"
+
+# Variable scoping - $item and $index restored after loop
+test_case "item unset after loop" "each a b; true; end; echo [\$item]" "[]"
+test_case "index unset after loop" "each a b; true; end; echo [\$index]" "[]"
+test_case "Outer item restored" "var item outer; each a b; true; end; echo \$item" "outer"
+test_case "Outer index restored" "var index 99; each a b; true; end; echo \$index" "99"
+test_case "Nested item shadowing" "each X Y; var o \$item; each 1 2; true; end; echo -n \$item; end" "XY"
+test_case "Nested index shadowing" "each X Y; var oi \$index; each 1 2; true; end; echo -n \$index; end" "12"
+
+# ============================================================================
+# Block Scoping
+# ============================================================================
+print_header "Block Scoping (12 tests)"
+
+# New variables in blocks are local (not visible outside)
+test_case "If new var is local" "if true; var x local; end; echo [\$x]" "[]"
+test_case "Else new var is local" "if false; var a if; else; var b else; end; echo [\$a][\$b]" "[][]"
+test_case "While new var is local" "var i 0; while test \$i -lt 1; var x loop; increment i; end; echo [\$x]" "[]"
+test_case "Function new var is local" "fun f; var x local; end; f; echo [\$x]" "[]"
+
+# Setting existing variables updates them in their original scope
+test_case "If updates outer var" "var x outer; if true; var x inner; end; echo \$x" "inner"
+test_case "While updates outer var" "var x before; var i 0; while test \$i -lt 1; var x after; increment i; end; echo \$x" "after"
+test_case "Function updates outer var" "var x outer; fun f; var x inner; end; f; echo \$x" "inner"
+
+# Function argv is properly scoped (restored after call)
+test_case "Function argv is local" "var argv original; fun f; echo \$argv; end; f arg1 arg2; echo \$argv" "arg1 arg2\noriginal"
+
+# Cross-block scoping - new vars in nested blocks are local to that block
+test_case "Loop in if is scoped" "if true; each a b; var x \$item; end; echo [\$x]; end; echo done" "[]\ndone"
+test_case "If in loop is scoped" "each a; if true; var y inner; end; echo [\$y]; end" "[]"
+
+# Nested updates propagate to outermost definition
+test_case "Nested if updates outer" "var x 1; if true; var x 2; if true; var x 3; end; end; echo \$x" "3"
+test_case "Nested loop updates outer" "var x 0; each a; each b; var x \$item; end; end; echo \$x" "b"
+
+# ============================================================================
+# While Loops and Loop Control
+# ============================================================================
+print_header "While Loops (4 tests)"
+
+test_case "While false" "while false; echo never; end; echo done" "done"
+test_exit_code "While with break" "var i 0; while true; var i 1; break; end" "0"
+test_exit_code "For continue skips" "for x in 1 2 3; if test \$x = 2; continue; end; echo \$x; end" "0"
+test_case "For continue output" "for x in a b c; if test \$x = b; continue; end; echo -n \$x; end" "ac"
+
+# ============================================================================
+# Functions
+# ============================================================================
+print_header "Functions (15 tests)"
+
+test_case "Simple function" "fun greet; echo hello; end; greet" "hello"
+# Note: Function arg tests use simpler syntax to avoid segfaults
+test_case "Function with arg" "fun say; echo \$argv[1]; end; say world" "world"
+test_case "Function multiple args" "fun add; echo \$argv[1] \$argv[2]; end; add a b" "a b"
+test_case "Function argv" "fun show; echo \$argv; end; show x y z" "x y z"
+test_case "Function argv indexing" "fun first; echo \$argv[1]; end; first foo bar" "foo"
+test_exit_code "Function early return" "fun early; echo before; return; echo after; end; early" "0"
+test_case "Function with if" "fun check; if test \$argv[1] = yes; echo ok; end; end; check yes" "ok"
+test_exit_code "Function with loop" "fun loop; for x in \$argv; echo \$x; end; end; loop a b" "0"
+test_case "Function reassignment" "fun f; echo old; end; fun f; echo new; end; f" "new"
+# Note: avoid using "test" as function name since it shadows the builtin
+test_case "Function with variable" "fun myfunc; var x local; echo \$x; end; myfunc" "local"
+test_case "Function positional \$argv[2]" "fun second; echo \$argv[2]; end; second a b c" "b"
+
+# Return code tests (our fixes!)
+test_exit_code "Return 42" "fun f; return 42; end; f" "42"
+test_exit_code "Return 0" "fun f; return 0; end; f" "0"
+test_exit_code "Return 99" "fun f; return 99; end; f" "99"
+test_exit_code "Return in else if" "fun check; if test a = a; return 5; else if test b = b; return 10; end; end; check" "5"
+
+# Recursion limit
+test_exit_code "Recursion limit" "fun r; r; end; r" "1"
+
+# ============================================================================
+# Aliases
+# ============================================================================
+print_header "Aliases (5 tests)"
+
+test_case "Simple alias" "alias e echo; e test" "test"
+test_case "Alias expansion" "alias greeting 'echo hello'; greeting" "hello"
+test_case "Alias in function" "alias greet 'echo hi'; fun f; greet; end; f" "hi"
+test_exit_code "Alias multiple in function" "alias e 'echo'; fun f; e a; e b; end; f" "0"
+test_case "Alias with quotes" "alias greet 'echo \"hello world\"'; greet" "hello world"
+
+# ============================================================================
+# Pipelines
+# ============================================================================
+print_header "Pipelines (8 tests)"
+
+test_case "Simple pipe" "echo hello | cat" "hello"
+test_case "Multiple pipes" "echo hello | cat | cat" "hello"
+test_case "Pipe with variable" "var x test; echo \$x | cat" "test"
+test_case "Alternative pipe |>" "echo test |> cat" "test"
+test_case "Chained |>" "echo hello |> cat |> cat" "hello"
+test_case "Pipe with substitution" "echo \$(echo test) | cat" "test"
+# Note: wc -l output has leading spaces on macOS, use tr to strip them
+test_case "Pipe to wc" "printf 'a\nb\nc\n' | wc -l | tr -d ' '" "3"
+test_case "Pipe to head" "printf '1\n2\n3\n4\n' | head -n 1" "1"
+
+# ============================================================================
+# Output Capture
+# ============================================================================
+print_header "Output Capture (12 tests)"
+
+test_case "String capture =>" "echo hello => x; echo \$x" "hello"
+test_case "Capture to new var" "echo world => greeting; echo \$greeting" "world"
+test_case "Capture empty" "echo => x; echo [\$x]" "[]"
+test_case "Capture multi-word" "echo one two three => words; echo \$words" "one two three"
+test_case "Capture command output" "= 2 + 3 => result; echo \$result" "5"
+test_case "Multiple captures" "echo a => x; echo b => y; echo \$x \$y" "a b"
+
+# Stderr capture (=> captures both stdout and stderr)
+test_case "Capture stderr" "sh -c 'echo error >&2' => output; echo \$output" "error"
+test_case "Capture stdout and stderr" "sh -c 'echo out; echo err >&2' => output; echo \$output" "out\nerr"
+test_case "Capture only stderr when no stdout" "sh -c 'echo warning >&2' => msg; echo \$msg" "warning"
+test_case "Capture interleaved stdout/stderr" "sh -c 'echo a; echo b >&2; echo c' => result; echo \$result" "a\nb\nc"
+
+# Stderr redirect to /dev/null (only stdout captured)
+test_case "Capture stdout with stderr to /dev/null" "sh -c 'echo out; echo err >&2' 2>/dev/null => output; echo \$output" "out"
+test_case "Capture only stdout when stderr discarded" "sh -c 'echo keep; echo discard >&2' 2>/dev/null => result; echo \$result" "keep"
+
+# ============================================================================
+# Logical Operators
+# ============================================================================
+print_header "Logical Operators (8 tests)"
+
+test_case "AND with &&" "true && echo yes" "yes"
+test_case "AND with false" "false && echo no" ""
+test_case "OR with ||" "false || echo yes" "yes"
+test_case "OR with true" "true || echo no" ""
+test_case "Word AND" "true and echo yes" "yes"
+test_case "Word OR" "false or echo yes" "yes"
+test_case "Chained AND" "true && true && echo yes" "yes"
+test_case "Chained OR" "false || false || echo yes" "yes"
+
+# ============================================================================
+# Special Variables
+# ============================================================================
+print_header "Special Variables (6 tests)"
+
+test_case "Exit status \$?" "true; echo \$?" "0"
+test_case "Exit status fail" "false; echo \$?" "1"
+test_case "Status variable" "true; echo \$status" "0"
+test_case "Tilde expansion" "echo ~" "$HOME"
+test_case "Status chain" "true; true; echo \$?" "0"
+test_case "Status after false" "true; false; echo \$?" "1"
+
+# ============================================================================
+# CD and Directory Navigation (our fixes!)
+# ============================================================================
+print_header "Directory Navigation (5 tests)"
+
+test_exit_code "CD to /tmp and pwd" "cd /tmp; pwd | grep -q tmp" "0"
+test_exit_code "CD to valid dir succeeds" "cd /tmp" "0"
+test_exit_code "CD to invalid dir fails" "cd /nonexistent/path/xyz" "1"
+# Note: cd - may succeed if OLDPWD is set from earlier in the session
+test_exit_code "CD to home" "cd ~" "0"
+
+# Test cd - functionality (skip the output check, just verify it works)
+cd /tmp
+cd /usr
+cd -
+var prev_worked $?
+if test $prev_worked -eq 0
+    print -n --green "✓ "
+    print "CD - returns to previous"
+    increment PASS
+else
+    print -n --red "✗ "
+    print "CD - returns to previous"
+    increment FAIL
+end
+increment TOTAL
+
+# ============================================================================
+# Builtins
+# ============================================================================
+print_header "Builtins (8 tests)"
+
+test_case "echo builtin" "echo test" "test"
+test_case "echo -n no newline" "echo -n test" "test"
+test_case "echo multiple args" "echo a b c" "a b c"
+test_exit_code "true builtin" "true" "0"
+test_exit_code "false builtin" "false" "1"
+test_exit_code "pwd builtin" "cd /tmp; pwd | grep -q tmp" "0"
+test_exit_code "type builtin" "type echo" "0"
+test_exit_code "type external" "type ls" "0"
+
+# ============================================================================
+# Builtin Prefix (oshen:)
+# ============================================================================
+print_header "Builtin Prefix oshen: (9 tests)"
+
+# Direct oshen: prefix invocation
+test_case "oshen:echo works" "oshen:echo hello" "hello"
+test_exit_code "oshen:pwd works" "cd /; oshen:pwd | grep -q '^/$'" "0"
+test_exit_code "oshen:true returns 0" "oshen:true" "0"
+test_exit_code "oshen:false returns 1" "oshen:false" "1"
+
+# Function shadows builtin, oshen: bypasses it
+test_case "Function shadows builtin" "fun echo; oshen:echo SHADOW; end; echo test" "SHADOW"
+test_case "oshen: bypasses function shadow" "fun echo; oshen:echo SHADOW; end; oshen:echo test" "test"
+
+# Alias shadows builtin, oshen: bypasses it
+test_case "Alias shadows builtin" "alias pwd 'echo ALIAS'; pwd" "ALIAS"
+test_exit_code "oshen: bypasses alias shadow" "alias pwd 'echo ALIAS'; oshen:pwd | grep -qv ALIAS" "0"
+
+# Function shadow works in command substitution
+test_case "Function shadow in capture" "fun echo; oshen:echo FUNC; end; var x \$(echo test); oshen:echo \$x" "FUNC"
+
+# ============================================================================
+# File Tests
+# ============================================================================
+print_header "File Tests (8 tests)"
+
+# Wrap file tests in a function with defer for automatic cleanup
+fun run_file_tests
+    var testdir /tmp/oshen_dogfood_test
+    mkdir -p $testdir
+    defer rm -rf $testdir
+
+    touch $testdir/exists.txt
+    echo "content" > $testdir/nonempty.txt
+    mkdir -p $testdir/testdir
+
+    test_exit_code "Test -e exists" "test -e $testdir/exists.txt" "0"
+    test_exit_code "Test -e not exists" "test -e $testdir/nonexistent" "1"
+    test_exit_code "Test -f regular file" "test -f $testdir/exists.txt" "0"
+    test_exit_code "Test -f directory" "test -f $testdir/testdir" "1"
+    test_exit_code "Test -d directory" "test -d $testdir/testdir" "0"
+    test_exit_code "Test -d file" "test -d $testdir/exists.txt" "1"
+    test_exit_code "Test -s non-empty" "test -s $testdir/nonempty.txt" "0"
+    test_exit_code "Test -s empty" "test -s $testdir/exists.txt" "1"
+end
+run_file_tests
+
+# ============================================================================
+# Source Builtin
+# ============================================================================
+print_header "Source Builtin (4 tests)"
+
+fun run_source_tests
+    var testfile1 /tmp/oshen_source_test.wave
+    var testfile2 /tmp/oshen_source_test2.wave
+    var testfile3 /tmp/oshen_source_test3.wave
+    defer rm -f $testfile1 $testfile2 $testfile3
+
+    echo "var SOURCED_VAR sourced_value" > $testfile1
+    echo "var SOURCED_A 1" > $testfile2
+    echo "var SOURCED_B 2" >> $testfile2
+
+    # File with comments and empty lines
+    echo "# This is a comment" > $testfile3
+    echo "" >> $testfile3
+    echo "var COMMENT_VAR1 value1" >> $testfile3
+    echo "# Another comment" >> $testfile3
+    echo "var COMMENT_VAR2 value2" >> $testfile3
+
+    test_case "Source sets variable" "source $testfile1; echo \$SOURCED_VAR" "sourced_value"
+    test_case "Source multiple vars" "source $testfile2; echo \$SOURCED_A \$SOURCED_B" "1 2"
+    test_case "Source skips comments" "source $testfile3; echo \$COMMENT_VAR1 \$COMMENT_VAR2" "value1 value2"
+    test_exit_code "Source nonexistent fails" "source /tmp/nonexistent_file_12345.wave" "1"
+end
+run_source_tests
+
+# ============================================================================
+# Redirections
+# ============================================================================
+print_header "Redirections (9 tests)"
+
+fun run_redir_tests
+    var testdir /tmp/oshen_redir_test
+    mkdir -p $testdir
+    defer rm -rf $testdir
+
+    test_case "Output redirect >" "echo hello > $testdir/out.txt; cat $testdir/out.txt" "hello"
+    test_exit_code "Append redirect >>" "echo a > $testdir/append.txt; echo b >> $testdir/append.txt" "0"
+    test_case "Input redirect <" "echo content > $testdir/in.txt; cat < $testdir/in.txt" "content"
+    test_case "Redirect overwrite" "echo first > $testdir/over.txt; echo second > $testdir/over.txt; cat $testdir/over.txt" "second"
+    test_case "Redirect to /dev/null" "echo hidden > /dev/null; echo shown" "shown"
+    test_case "Redirect in pipeline" "echo data | cat > $testdir/pipe.txt; cat $testdir/pipe.txt" "data"
+
+    # Quoted redirect paths
+    test_case "Redirect quoted path with spaces" "echo test > \"$testdir/foo bar.txt\"; cat \"$testdir/foo bar.txt\"" "test"
+    test_case "Redirect variable path" "var outfile $testdir/varfile.txt; echo vardata > \$outfile; cat \$outfile" "vardata"
+    test_case "Redirect double-quoted var" "var name myout; echo content > \"$testdir/\$name.txt\"; cat $testdir/myout.txt" "content"
+    test_case "Redirect single-quoted no expand" "var dollar literal; echo nope > '$testdir/literal.txt'; cat $testdir/literal.txt" "nope"
+end
+run_redir_tests
+
+# ============================================================================
+# Lines Capture
+# ============================================================================
+print_header "Lines Capture (4 tests)"
+
+test_case "Lines capture =>@" "printf 'a\nb\nc\n' =>@ arr; echo \$arr[2]" "b"
+test_case "Lines capture first" "printf 'x\ny\nz\n' =>@ lines; echo \$lines[1]" "x"
+test_case "Lines capture last" "printf '1\n2\n3\n' =>@ nums; echo \$nums[-1]" "3"
+test_case "Lines capture all" "printf 'one\ntwo\n' =>@ words; echo \$words" "one two"
+
+# ============================================================================
+# Glob Patterns
+# ============================================================================
+print_header "Glob Patterns (5 tests)"
+
+fun run_glob_tests
+    var testdir /tmp/oshen_glob_test_dogfood
+    mkdir -p $testdir
+    defer rm -rf $testdir
+
+    touch $testdir/a.txt $testdir/b.txt $testdir/c.txt
+    touch $testdir/test.md
+
+    test_case "Glob star txt" "cd $testdir; echo *.txt" "a.txt b.txt c.txt"
+    test_case "Glob star md" "cd $testdir; echo *.md" "test.md"
+    test_case "Glob in for loop" "cd $testdir; for f in *.md; echo \$f; end" "test.md"
+    test_case "Glob no matches literal" "cd $testdir; echo *.xyz" "*.xyz"
+    # Note: use exit code tests to avoid glob expansion in expected value
+    test_exit_code "Glob suppressed in single quotes" "cd $testdir; test \"\$(echo '*.txt')\" = '*.txt'" "0"
+end
+run_glob_tests
+
+# ============================================================================
+# Comments
+# ============================================================================
+print_header "Comments (3 tests)"
+
+test_case "Inline comment" "echo hello # this is ignored" "hello"
+test_case "Hash in double quotes" 'echo "hashtag #test"' "hashtag #test"
+test_case "Hash in single quotes" "echo 'number #1'" "number #1"
+
+# ============================================================================
+# Additional Test Operators
+# ============================================================================
+print_header "Additional Test Operators (16 tests)"
+
+test_exit_code "Test -le less equal" "test 5 -le 5" "0"
+test_exit_code "Test -le less" "test 3 -le 5" "0"
+test_exit_code "Test -ge greater equal" "test 5 -ge 5" "0"
+test_exit_code "Test -ge greater" "test 7 -ge 5" "0"
+test_case "Bracket test syntax" "if [ 1 -eq 1 ]; echo bracket; end" "bracket"
+test_case "Bracket test with var" "var x 5; if [ \$x -gt 3 ]; echo big; end" "big"
+
+# Logical operators -a (AND) and -o (OR)
+test_exit_code "Test -a both true" "test -n hello -a -n world" "0"
+test_exit_code "Test -a first false" 'test -z "hello" -a -n world' "1"
+test_exit_code "Test -a second false" 'test -n hello -a -z "world"' "1"
+test_exit_code "Test -o both false" 'test -z "hello" -o -z "world"' "1"
+test_exit_code "Test -o first true" "test -n hello -o -z world" "0"
+test_exit_code "Test -o second true" 'test -z "hello" -o -n world' "0"
+
+# Parentheses grouping
+test_exit_code "Test parens simple" 'test "(" -n hello ")"' "0"
+test_exit_code "Test parens with -a" 'test "(" 5 -gt 3 -a 2 -lt 4 ")"' "0"
+test_exit_code "Test parens with -o" 'test "(" 1 -eq 2 -o 3 -eq 3 ")"' "0"
+test_case "Test complex conditional" 'if test "(" 5 -gt 3 -a 2 -lt 10 ")"; echo complex; end' "complex"
+
+# ============================================================================
+# Function Arg Count
+# ============================================================================
+print_header "Function Arg Count (3 tests)"
+
+test_case "Function argc 3" 'fun count; echo $#; end; count a b c' "3"
+test_case "Function argc 0" 'fun count; echo $#; end; count' "0"
+test_case "Function argc 1" 'fun count; echo $#; end; count single' "1"
+
+# ============================================================================
+# Error Handling
+# ============================================================================
+print_header "Error Handling (4 tests)"
+
+test_exit_code "Unknown command exit 127" "nonexistentcommand123456" "127"
+test_exit_code "False returns 1" "false" "1"
+test_exit_code "Test failure returns 1" "test 1 -eq 2" "1"
+test_case "Command after error status" "false; echo \$?" "1"
+
+# ============================================================================
+# Unicode and Special Characters
+# ============================================================================
+print_header "Unicode and Special (4 tests)"
+
+test_case "Unicode in string" 'echo "hello 世界"' "hello 世界"
+test_case "Emoji in string" 'echo "test 🎉"' "test 🎉"
+test_case "Ampersand in quotes" 'echo "Tom & Jerry"' "Tom & Jerry"
+test_case "Special chars preserved" 'echo "a@b#c"' "a@b#c"
+
+# ============================================================================
+# Complex Scenarios
+# ============================================================================
+print_header "Complex Scenarios (6 tests)"
+
+test_case "Function with multiple returns" "fun check; if test \$1 = a; return 1; else if test \$1 = b; return 2; else; return 3; end; end; check b; echo \$?" "2"
+test_exit_code "Nested loops with break" "for x in 1 2; for y in a b c; echo \$x\$y; if test \$y = b; break; end; end; end" "0"
+test_exit_code "Conditional in loop" "for i in 1 2 3 4 5; if test \$i -gt 3; echo \$i; end; end" "0"
+test_case "Arithmetic in loop" "var sum 0; for i in 1 2 3; var sum (= \$sum + \$i); end; echo \$sum" "6"
+test_case "Pipeline with multiple stages" "printf '1\n2\n3\n4\n5\n' | head -n 3 | tail -n 1" "3"
+test_case "Capture in conditional" "echo 5 => num; if test \$num -eq 5; echo match; end" "match"
+
+# ============================================================================
+# Print Builtin (Colored Output)
+# ============================================================================
+print_header "Print Builtin (13 tests)"
+
+# Basic echo-like behavior (print always appends reset code)
+test_case "Print simple text" "print hello" "hello\e[0m"
+test_case "Print multiple args" "print hello world" "hello world\e[0m"
+test_case "Print -n no newline" "print -n test; echo done" "test\e[0mdone"
+
+# Color output - test that ANSI codes are included
+test_case "Print green text" 'print --green ok' "\e[32mok\e[0m"
+test_case "Print red text" 'print --red error' "\e[31merror\e[0m"
+test_case "Print yellow text" 'print --yellow warn' "\e[33mwarn\e[0m"
+test_case "Print blue text" 'print --blue info' "\e[34minfo\e[0m"
+
+# Style flags
+test_case "Print bold text" 'print --bold important' "\e[1mimportant\e[0m"
+test_case "Print dim text" 'print --dim subtle' "\e[2msubtle\e[0m"
+
+# Interleaved colors
+test_case "Print interleaved colors" 'print --green ok --reset normal' "\e[32mok\e[0m normal\e[0m"
+
+# Combined styles
+test_case "Print bold and red" 'print --bold --red error' "\e[1m\e[31merror\e[0m"
+
+# Aliases and additional colors
+test_case "Print purple (magenta alias)" 'print --purple text' "\e[35mtext\e[0m"
+test_case "Print gray text" 'print --gray muted' "\e[90mmuted\e[0m"
+
+# ============================================================================
+# Defer Statements
+# ============================================================================
+print_header "Defer Statements (10 tests)"
+
+test_case "Simple defer" "fun f; defer echo cleanup; echo work; end; f" "work
+cleanup"
+test_case "Defer LIFO order" "fun f; defer echo first; defer echo second; defer echo third; echo work; end; f" "work
+third
+second
+first"
+test_case "Defer with early return" "fun f; defer echo cleanup; echo before; return; echo after; end; f" "before
+cleanup"
+test_case "Defer with variable" "fun f; var msg done; defer echo \$msg; echo working; end; f" "working
+done"
+test_case "Nested function defer" "fun inner; defer echo inner_cleanup; echo inner_work; end; fun outer; defer echo outer_cleanup; inner; echo outer_work; end; outer" "inner_work
+inner_cleanup
+outer_work
+outer_cleanup"
+test_exit_code "Defer preserves exit status" "fun f; defer echo cleanup; return 42; end; f" "42"
+
+# Tests for defer inside control flow blocks (previously caused segfault)
+test_case "Defer in if block" "fun f; defer echo outer; if true; defer echo inner; end; echo body; end; f" "body
+inner
+outer"
+test_case "Defer in else block" "fun f; defer echo outer; if false; echo no; else; defer echo else_defer; end; echo body; end; f" "body
+else_defer
+outer"
+test_case "Defer with conditional return" "fun f; defer echo d1; defer echo d2; if test \$1 -eq 1; defer echo d3; return 1; end; defer echo d4; return 0; end; f 1" "d3
+d2
+d1"
+test_exit_code "Defer conditional return status" "fun f; defer echo d1; if true; defer echo d2; return 5; end; end; f" "5"
+
+# ============================================================================
+# Calc Builtin (and = alias)
+# ============================================================================
+print_header "Calc Builtin (20 tests)"
+
+# Basic operations (using = alias)
+test_case "Calc addition" '= 2 + 3' "5"
+test_case "Calc subtraction" '= 10 - 3' "7"
+test_case "Calc multiplication" '= "4 * 5"' "20"
+test_case "Calc division" '= 20 / 4' "5"
+test_case "Calc modulo" '= 17 % 5' "2"
+
+# Operator precedence
+test_case "Calc precedence mul before add" '= "2 + 3 * 4"' "14"
+test_case "Calc precedence with parens" '= "(2 + 3) * 4"' "20"
+test_case "Calc nested parens" '= "((2 + 3) * 2) + 1"' "11"
+
+# Unary minus
+test_case "Calc negative number" '= -5 + 10' "5"
+test_case "Calc double negative" '= "- -5"' "5"
+
+# With variables and command substitution
+test_case "Calc with variable" 'var x 5; = $x + 3' "8"
+test_case "Calc with bare paren capture" 'var result (= 3 + 4); echo $result' "7"
+test_case "Calc in loop" 'var sum 0; for i in 1 2 3; set sum (= $sum + $i); end; echo $sum' "6"
+
+# Test calc name (not just = alias)
+test_case "Calc name works" 'calc 10 + 5' "15"
+test_case "Calc name with parens" 'var x (calc 2 "*" 3); echo $x' "6"
+
+# Test x as multiplication operator (like Fish shell)
+test_case "Calc with x operator" '= 4 x 5' "20"
+test_case "Calc x operator multiple" '= 2 x 3 x 4' "24"
+test_case "Calc x with precedence" '= 2 + 3 x 4' "14"
+test_case "Calc x in capture" 'var result (= 10 x 5); echo $result' "50"
+
+# Error handling
+test_exit_code "Calc division by zero" '= 5 / 0' "1"
+
+# ============================================================================
+# Increment Builtin
+# ============================================================================
+print_header "Increment Builtin (9 tests)"
+
+# Basic increment
+test_case "Increment by 1" 'var count 5; increment count; echo $count' "6"
+test_case "Increment by 5" 'var count 10; increment --by 5 count; echo $count' "15"
+test_case "Increment by negative (decrement)" 'var count 10; increment --by -3 count; echo $count' "7"
+test_case "Increment from 0" 'var count 0; increment count; echo $count' "1"
+test_case "Increment negative number" 'var count -5; increment count; echo $count' "-4"
+test_case "Increment multiple times" 'var n 1; increment n; increment n; increment n; echo $n' "4"
+
+# Error handling
+test_exit_code "Increment nonexistent variable" 'increment nonexistent' "1"
+test_exit_code "Increment non-numeric variable" 'var text hello; increment text' "1"
+test_exit_code "Increment with non-numeric --by" 'var count 5; increment --by abc count' "1"
+
+# ============================================================================
+# String Builtin
+# ============================================================================
+print_header "String Builtin (46 tests)"
+
+# Basic transformations (no trailing newline - use echo to display)
+test_case "String upper" 'echo $(string --upper hello)' "HELLO"
+test_case "String lower" 'echo $(string --lower WORLD)' "world"
+test_case "String trim" 'echo $(string --trim "  hello  ")' "hello"
+test_case "String reverse" 'echo $(string --reverse hello)' "olleh"
+
+# Combined transformations
+test_case "String trim upper" 'echo $(string --trim --upper "  hello  ")' "HELLO"
+test_case "String reverse upper" 'echo $(string --reverse --upper hello)' "OLLEH"
+test_case "String trim reverse lower" 'echo $(string --trim --reverse --lower "  HELLO  ")' "olleh"
+
+# Multiple strings
+test_case "String upper multiple" 'echo $(string --upper hello world)' "HELLO WORLD"
+test_case "String lower multiple" 'echo $(string --lower FOO BAR BAZ)' "foo bar baz"
+
+# Length
+test_case "String length" 'echo $(string --length hello)' "5"
+test_case "String length multiple" 'string --length foo barbaz' "3\n6"
+test_case "String length with trim" 'echo $(string --trim --length "  hi  ")' "2"
+
+# Split (split outputs newline-separated values)
+test_case "String split colon" 'string --split : "a:b:c"' "a\nb\nc"
+test_case "String split comma" 'string --split , "x,y,z"' "x\ny\nz"
+test_case "String split multi-char" 'string --split :: "a::b::c"' "a\nb\nc"
+
+# Join
+test_case "String join dash" 'echo $(string --join - a b c)' "a-b-c"
+test_case "String join comma" 'echo $(string --join ", " foo bar baz)' "foo, bar, baz"
+test_case "String join empty" 'echo $(string --join "" a b c)' "abc"
+
+# Replace
+test_case "String replace simple" 'echo $(string --replace o 0 hello)' "hell0"
+test_case "String replace all" 'echo $(string --replace o 0 "hello world foo")' "hell0 w0rld f00"
+test_case "String replace multi-char" 'echo $(string --replace foo bar "foobar foobaz")' "barbar barbaz"
+
+# Substring
+test_case "String sub from start" 'echo $(string --sub 1 3 hello)' "hel"
+test_case "String sub middle" 'echo $(string --sub 2 3 hello)' "ell"
+test_case "String sub to end" 'echo $(string --sub 3 hello)' "llo"
+test_case "String sub negative" 'echo $(string --sub -3 hello)' "llo"
+test_case "String sub negative with len" 'echo $(string --sub -4 2 hello)' "el"
+
+# Repeat
+test_case "String repeat 3" 'echo $(string --repeat 3 ab)' "ababab"
+test_case "String repeat 1" 'echo $(string --repeat 1 test)' "test"
+test_case "String repeat 0" 'echo "$(string --repeat 0 test)"' ""
+
+# Padding (--pad is right-pad, --pad-left is left-pad)
+test_case "String pad-left" 'echo $(string --pad-left 8 hello)' "   hello"
+test_case "String pad-left with char" 'echo $(string --pad-left 8 0 42)' "00000042"
+test_case "String pad" 'echo "[$(string --pad 10 hello)]"' "[hello     ]"
+test_case "String pad with char" 'echo $(string --pad 10 . file)' "file......"
+
+# Pattern matching
+test_exit_code "String match success" 'string --match "*.txt" "file.txt"' "0"
+test_exit_code "String match failure" 'string --match "*.txt" "file.md"' "1"
+test_exit_code "String match wildcard" 'string --match "*hello*" "say hello world"' "0"
+test_exit_code "String match question" 'string --match "test?" "test1"' "0"
+test_exit_code "String match char class" 'string --match "[0-9]*" "123abc"' "0"
+test_exit_code "String match negated class" 'string --match "[!0-9]*" "abc123"' "0"
+
+# Contains
+test_exit_code "String contains success" 'string --contains foo "foobar"' "0"
+test_exit_code "String contains failure" 'string --contains baz "foobar"' "1"
+test_exit_code "String contains multi" 'string --contains o "hello" "world"' "0"
+test_exit_code "String contains with transform" 'string --upper --contains HELLO "hello world"' "0"
+
+# ============================================================================
+# List Builtin
+# ============================================================================
+print_header "List Builtin (28 tests)"
+
+# Basic range creation
+test_case "List numeric range" 'list 1..5' "1\n2\n3\n4\n5"
+test_case "List range descending" 'list 5..1' "5\n4\n3\n2\n1"
+test_case "List range with step" 'list 1..10 --step 2' "1\n3\n5\n7\n9"
+test_case "List range step short" 'list 1..10 -s 3' "1\n4\n7\n10"
+test_case "List negative range" 'list -2..2' "-2\n-1\n0\n1\n2"
+
+# Alphabetic ranges
+test_case "List alpha range" 'list a..e' "a\nb\nc\nd\ne"
+test_case "List alpha descending" 'list e..a' "e\nd\nc\nb\na"
+test_case "List alpha uppercase" 'list A..E' "A\nB\nC\nD\nE"
+
+# Literal items
+test_case "List literal items" 'list foo bar baz' "foo\nbar\nbaz"
+test_case "List with separator" 'list a b c -S ", "' "a, b, c"
+
+# Transforms
+test_case "List sort" 'list c a b --sort' "a\nb\nc"
+test_case "List sort numeric" 'list 10 2 1 20 -n' "1\n2\n10\n20"
+test_case "List reverse" 'list a b c --reverse' "c\nb\na"
+test_case "List unique" 'list a b a c b --unique' "a\nb\nc"
+test_case "List sort reverse" 'list c a b --sort --reverse' "c\nb\na"
+
+# Variable reference and --into
+test_case "List into variable" 'list 1..3 => nums; echo $nums' "1\n2\n3"
+test_case "List from variable" 'var items c b a; list --sort $items' "a\nb\nc"
+test_case "List var transform into" 'var nums 3 1 2; list --sort @nums =>@ sorted; echo $sorted' "1 2 3"
+
+# Append and prepend
+#test_case "List append" 'var base a b; list --append c d @base => result; echo $result' "a b c d"
+#test_case "List prepend" 'var base c d; list --prepend a b @base => result; echo $result' "a b c d"
+
+# Inplace mutation
+test_case "List inplace sort" 'var items c b a; list @items --sort; echo $items' "a b c"
+test_case "List inplace unique" 'var items 1 2 2 3; list @items --unique; echo $items' "1 2 3"
+test_case "List inplace reverse" 'var items a b c; list @items --reverse; echo $items' "c b a"
+
+# Length
+test_case "List length" 'list a b c d e --length' "5"
+test_case "List length into var" 'list 1..10 --length => count; echo $count' "10"
+
+# Contains and empty tests
+test_exit_code "List contains found" 'list a b c --contains b' "0"
+test_exit_code "List contains not found" 'list a b c --contains x' "1"
+test_exit_code "List empty true" 'true | list --empty' "0"
+
+# Error case
+test_exit_code "List zero step fails" 'list 1..5 --step 0' "1"
+
+# ============================================================================
+# Print Summary
+# ============================================================================
+
+print ""
+print "═══════════════════════════════════════════════════════════"
+print "                      TEST SUMMARY"
+print "═══════════════════════════════════════════════════════════"
+print ""
+print "Total Tests:  $TOTAL"
+print --green "Passed:       $PASS"
+print --red "Failed:       $FAIL"
+print ""
+
+# Calculate pass rate (using * without escape for oshen)
+var PASS_RATE (= $PASS '*' 100 / $TOTAL)
+print "Pass Rate: $PASS_RATE%"
+print ""
+
+if test $FAIL -eq 0
+    print --green "🎉 All tests passed!"
+    exit 0
+else
+    print --yellow "⚠️  Some tests failed."
+    exit 1
+end
