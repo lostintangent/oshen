@@ -7,17 +7,17 @@ class Oshen < Formula
   on_macos do
     on_arm do
       url "https://github.com/lostintangent/oshen/releases/latest/download/oshen-macos-arm64.tar.gz"
-      sha256 "d571e94713b73ca6a38729f10a72e23aa9f6b6946c32e9f96572abe12544ab58"
+      sha256 "6b14ebb4533eff55bc21d3aa5c19397887e3f019b028c1a2138e7847f29dfcc8"
     end
     on_intel do
       url "https://github.com/lostintangent/oshen/releases/latest/download/oshen-macos-x86_64.tar.gz"
-      sha256 "050f13b010fc1614dcc7c8d35adbcbeec9d82f2589adb03ca92bdcf4211d142f"
+      sha256 "44242dc976808ff566e2993d713871b551346f6b2b79d8616fd5bf68ae73a38c"
     end
   end
 
   on_linux do
     url "https://github.com/lostintangent/oshen/releases/latest/download/oshen-linux-x86_64.tar.gz"
-    sha256 "4b384b7717c939ac1e64464f7f5aa375c08688e9132cf462b347d78b25d94cc4"
+    sha256 "4d0c754f4a0d26f650924478da8a228a29bb02aa540319f390788d5f684d1582"
   end
 
   def install
