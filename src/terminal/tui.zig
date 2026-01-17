@@ -307,10 +307,21 @@ pub fn emitOsc7(cwd: []const u8) void {
     const hostname = posix.gethostname(&hostname_buf) catch "localhost";
 
     var buf: [2048]u8 = undefined;
-    const seq = std.fmt.bufPrint(&buf, "{s}7;file://{s}{s}{s}", .{
-        ansi.osc_title_start[0..2], // Just ESC ]
+    const seq = std.fmt.bufPrint(&buf, "{s}file://{s}{s}{s}", .{
+        ansi.osc_cwd_start,
         hostname,
         cwd,
+        ansi.osc_end,
+    }) catch return;
+    io.writeStdout(seq);
+}
+
+/// Emit OSC 2 to set window title (reports current command to terminal).
+pub fn emitOsc2(title: []const u8) void {
+    var buf: [2048]u8 = undefined;
+    const seq = std.fmt.bufPrint(&buf, "{s}{s}{s}", .{
+        ansi.osc_title_start,
+        title,
         ansi.osc_end,
     }) catch return;
     io.writeStdout(seq);

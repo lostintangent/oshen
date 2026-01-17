@@ -87,7 +87,8 @@ pub const focus_off = dec ++ "1004l";
 // OSC Sequences
 // =============================================================================
 
-pub const osc_title_start = osc ++ "0;";
+pub const osc_cwd_start = osc ++ "7;"; // OSC 7: Set current working directory
+pub const osc_title_start = osc ++ "2;"; // OSC 2: Set window title
 pub const osc_end = "\x07";
 
 // =============================================================================

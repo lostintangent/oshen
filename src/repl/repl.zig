@@ -113,11 +113,12 @@ pub fn run(allocator: std.mem.Allocator, state: *State, evalFn: EvalFn) !void {
     while (true) {
         const prompt_str = prompt.build(allocator, state, &prompt_buf);
 
-        // Emit OSC 7 right before readLine so any command sent in response
+        // Emit OSC 7/2 right before readLine so any command sent in response
         // arrives when we're ready to receive it
         if (state.getCwd()) |cwd| {
             tui.emitOsc7(cwd);
         } else |_| {}
+        tui.emitOsc2("oshen");
 
         const line = editor.readLine(prompt_str) catch |err| {
             io.printError("oshen: input error: {}\n", .{err});
@@ -136,6 +137,9 @@ pub fn run(allocator: std.mem.Allocator, state: *State, evalFn: EvalFn) !void {
 
         // Clear any stale interrupt flag before executing (could be set by Ctrl+C during prompt)
         state.interrupted = false;
+
+        // Emit OSC 2 to report current command to terminal
+        tui.emitOsc2(line);
 
         // Execute the command (Note: Parse errors will be automatically printed to stdout)
         _ = evalFn(allocator, state, line) catch {};
